@@ -1,0 +1,484 @@
+{
+  "ai_name": "kimi",
+  "started_at": "2026-04-21T23:45:13.120664",
+  "initial_capital": 20000.0,
+  "cash": 20000.0,
+  "positions": {},
+  "trades": [],
+  "decisions": [
+    {
+      "time": "2026-04-21T23:45:18",
+      "prices": {
+        "RKLB": 90.7,
+        "RKLX": 49.02,
+        "RKLZ": 10.82
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP Error 404: Not Found",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP Error 404: Not Found"
+    },
+    {
+      "time": "2026-04-21T23:54:19",
+      "prices": {
+        "RKLB": 90.745,
+        "RKLX": 49.165,
+        "RKLZ": 10.71
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP Error 404: Not Found",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP Error 404: Not Found"
+    },
+    {
+      "time": "2026-04-21T23:57:18",
+      "prices": {
+        "RKLB": 90.8701,
+        "RKLX": 49.44,
+        "RKLZ": 10.6689
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP Error 404: Not Found",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP Error 404: Not Found"
+    },
+    {
+      "time": "2026-04-22T00:18:19",
+      "prices": {
+        "RKLB": 91.39,
+        "RKLX": 49.785,
+        "RKLZ": 10.61
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP Error 404: Not Found",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP Error 404: Not Found"
+    },
+    {
+      "time": "2026-04-22T00:21:19",
+      "prices": {
+        "RKLB": 90.95,
+        "RKLX": 49.47,
+        "RKLZ": 10.725
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP Error 404: Not Found",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP Error 404: Not Found"
+    },
+    {
+      "time": "2026-04-22T00:27:18",
+      "prices": {
+        "RKLB": 91.58,
+        "RKLX": 50.07,
+        "RKLZ": 10.56
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP Error 404: Not Found",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP Error 404: Not Found"
+    },
+    {
+      "time": "2026-04-22T00:42:20",
+      "prices": {
+        "RKLB": 91.72,
+        "RKLX": 50.24,
+        "RKLZ": 10.55
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP Error 404: Not Found",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP Error 404: Not Found"
+    },
+    {
+      "time": "2026-04-22T00:45:19",
+      "prices": {
+        "RKLB": 91.405,
+        "RKLX": 50.0,
+        "RKLZ": 10.6
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP Error 404: Not Found",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP Error 404: Not Found"
+    },
+    {
+      "time": "2026-04-22T00:48:19",
+      "prices": {
+        "RKLB": 90.605,
+        "RKLX": 49.33,
+        "RKLZ": 10.75
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP Error 404: Not Found",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP Error 404: Not Found"
+    },
+    {
+      "time": "2026-04-22T00:51:19",
+      "prices": {
+        "RKLB": 90.54,
+        "RKLX": 49.07,
+        "RKLZ": 10.78
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP Error 404: Not Found",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP Error 404: Not Found"
+    },
+    {
+      "time": "2026-04-22T00:54:20",
+      "prices": {
+        "RKLB": 90.04,
+        "RKLX": 48.5,
+        "RKLZ": 10.9095
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP Error 404: Not Found",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP Error 404: Not Found"
+    },
+    {
+      "time": "2026-04-22T00:57:21",
+      "prices": {
+        "RKLB": 89.4024,
+        "RKLX": 47.78
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP Error 404: Not Found",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP Error 404: Not Found"
+    },
+    {
+      "time": "2026-04-22T01:00:20",
+      "prices": {
+        "RKLB": 88.71,
+        "RKLX": 47.1,
+        "RKLZ": 11.235
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP Error 404: Not Found",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP Error 404: Not Found"
+    },
+    {
+      "time": "2026-04-22T01:09:20",
+      "prices": {
+        "RKLB": 88.57,
+        "RKLX": 46.935,
+        "RKLZ": 11.292
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP Error 404: Not Found",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP Error 404: Not Found"
+    },
+    {
+      "time": "2026-04-22T01:14:47",
+      "prices": {
+        "RKLB": 88.9401,
+        "RKLX": 47.37,
+        "RKLZ": 11.21
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP Error 404: Not Found",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP Error 404: Not Found"
+    },
+    {
+      "time": "2026-04-22T01:23:46",
+      "prices": {
+        "RKLB": 89.26
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP Error 404: Not Found",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP Error 404: Not Found"
+    },
+    {
+      "time": "2026-04-22T01:30:15",
+      "prices": {
+        "RKLB": 88.45,
+        "RKLX": 46.82,
+        "RKLZ": 11.3
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP 401 @ api.moonshot.ai: {\"error\":{\"message\":\"I",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP 401 @ api.moonshot.ai: {\"error\":{\"message\":\"Invalid Authentication\",\"type\":\"invalid_aut"
+    },
+    {
+      "time": "2026-04-22T01:33:14",
+      "prices": {
+        "RKLB": 89.1969,
+        "RKLX": 47.57,
+        "RKLZ": 11.1181
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP 401 @ api.moonshot.ai: {\"error\":{\"message\":\"I",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP 401 @ api.moonshot.ai: {\"error\":{\"message\":\"Invalid Authentication\",\"type\":\"invalid_aut"
+    },
+    {
+      "time": "2026-04-22T01:40:18",
+      "prices": {
+        "RKLB": 89.4,
+        "RKLX": 47.71,
+        "RKLZ": 11.09
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP 401 @ api.moonshot.ai: {\"error\":{\"message\":\"I",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP 401 @ api.moonshot.ai: {\"error\":{\"message\":\"Invalid Authentication\",\"type\":\"invalid_aut"
+    },
+    {
+      "time": "2026-04-22T01:55:17",
+      "prices": {
+        "RKLB": 89.17,
+        "RKLX": 47.5,
+        "RKLZ": 11.15
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP 401 @ api.moonshot.ai: {\"error\":{\"message\":\"I",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP 401 @ api.moonshot.ai: {\"error\":{\"message\":\"Invalid Authentication\",\"type\":\"invalid_aut"
+    },
+    {
+      "time": "2026-04-22T01:58:18",
+      "prices": {
+        "RKLB": 89.36,
+        "RKLX": 47.8,
+        "RKLZ": 11.0598
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP 401 @ api.moonshot.ai: {\"error\":{\"message\":\"I",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP 401 @ api.moonshot.ai: {\"error\":{\"message\":\"Invalid Authentication\",\"type\":\"invalid_aut"
+    },
+    {
+      "time": "2026-04-22T02:01:17",
+      "prices": {
+        "RKLB": 89.68,
+        "RKLX": 48.07,
+        "RKLZ": 10.9801
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP 401 @ api.moonshot.ai: {\"error\":{\"message\":\"I",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP 401 @ api.moonshot.ai: {\"error\":{\"message\":\"Invalid Authentication\",\"type\":\"invalid_aut"
+    },
+    {
+      "time": "2026-04-22T02:22:18",
+      "prices": {
+        "RKLB": 88.47
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP 401 @ api.moonshot.ai: {\"error\":{\"message\":\"I",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP 401 @ api.moonshot.ai: {\"error\":{\"message\":\"Invalid Authentication\",\"type\":\"invalid_aut"
+    },
+    {
+      "time": "2026-04-22T02:25:19",
+      "prices": {
+        "RKLB": 88.34,
+        "RKLX": 46.6001,
+        "RKLZ": 11.34
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP 401 @ api.moonshot.ai: {\"error\":{\"message\":\"I",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP 401 @ api.moonshot.ai: {\"error\":{\"message\":\"Invalid Authentication\",\"type\":\"invalid_aut"
+    },
+    {
+      "time": "2026-04-22T02:28:18",
+      "prices": {
+        "RKLB": 88.36,
+        "RKLX": 46.64,
+        "RKLZ": 11.33
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败: HTTP 401 @ api.moonshot.ai: {\"error\":{\"message\":\"I",
+        "confidence": 0,
+        "parse_ok": false
+      },
+      "tokens": 0,
+      "cost_usd": 0,
+      "raw_first_100": "[ERROR] HTTP 401 @ api.moonshot.ai: {\"error\":{\"message\":\"Invalid Authentication\",\"type\":\"invalid_aut"
+    }
+  ],
+  "ai_tokens": 0,
+  "ai_cost_usd": 0.0,
+  "ai_calls": 25,
+  "total_commission": 0.0
+}

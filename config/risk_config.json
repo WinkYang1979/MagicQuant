@@ -1,0 +1,27 @@
+{
+  "_comment": "MagicQuant v0.4 风控配置 - 所有阈值集中在这里调,不用改代码",
+  "_tuning_note": "这些默认值基于 $20k PDT 受限账户 + Moomoo AU 费率,明天实盘数据回来后再调",
+  
+  "pdt_limit":                      3,
+  
+  "daily_loss_limit_usd":           -400.0,
+  "max_drawdown_pct":               -8.0,
+  "consecutive_losses_limit":       3,
+  "cash_safety_margin":             10.0,
+  
+  "max_effective_leverage":         1.8,
+  "max_concentration_pct":          60.0,
+  
+  "min_net_profit_usd":             5.0,
+  "min_profit_over_fee_multiplier": 2.0,
+  "min_rr_ratio":                   1.5,
+  
+  "max_spread_pct":                 0.5,
+  
+  "min_confidence":                 0.60,
+  
+  "pre_earnings_warn_days":         2,
+  
+  "log_to_jsonl":                   true,
+  "log_max_bytes":                  10485760
+}

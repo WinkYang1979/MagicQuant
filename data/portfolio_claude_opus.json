@@ -1,0 +1,509 @@
+{
+  "ai_name": "claude_opus",
+  "started_at": "2026-04-21T23:45:13.120565",
+  "initial_capital": 20000.0,
+  "cash": 20000.0,
+  "positions": {},
+  "trades": [],
+  "decisions": [
+    {
+      "time": "2026-04-21T23:45:18",
+      "prices": {
+        "RKLB": 90.7,
+        "RKLX": 49.02,
+        "RKLZ": 10.82
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "开盘首轮无波动数据,观望",
+        "confidence": 70,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘首轮无波动数据,观望\",\"confidence\":70}"
+      },
+      "tokens": 882,
+      "cost_usd": 0.00545,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘首轮无波动数据,观望\",\"confidence\":70}"
+    },
+    {
+      "time": "2026-04-21T23:54:19",
+      "prices": {
+        "RKLB": 90.745,
+        "RKLX": 49.165,
+        "RKLZ": 10.71
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "盘初数据不足,无明确信号,观望",
+        "confidence": 70,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘初数据不足,无明确信号,观望\",\"confidence\":70}"
+      },
+      "tokens": 884,
+      "cost_usd": 0.0055,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘初数据不足,无明确信号,观望\",\"confidence\":70}"
+    },
+    {
+      "time": "2026-04-21T23:57:18",
+      "prices": {
+        "RKLB": 90.8701,
+        "RKLX": 49.44,
+        "RKLZ": 10.6689
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "盘后无波动数据,等待开盘信号",
+        "confidence": 80,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘后无波动数据,等待开盘信号\",\"confidence\":80}"
+      },
+      "tokens": 884,
+      "cost_usd": 0.0055,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘后无波动数据,等待开盘信号\",\"confidence\":80}"
+    },
+    {
+      "time": "2026-04-22T00:18:19",
+      "prices": {
+        "RKLB": 91.39,
+        "RKLX": 49.785,
+        "RKLZ": 10.61
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "盘前无波动数据,等待方向信号",
+        "confidence": 30,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘前无波动数据,等待方向信号\",\"confidence\":30}"
+      },
+      "tokens": 883,
+      "cost_usd": 0.005475,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘前无波动数据,等待方向信号\",\"confidence\":30}"
+    },
+    {
+      "time": "2026-04-22T00:21:19",
+      "prices": {
+        "RKLB": 90.95,
+        "RKLX": 49.47,
+        "RKLZ": 10.725
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "开盘数据不足,无方向信号,观望",
+        "confidence": 80,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘数据不足,无方向信号,观望\",\"confidence\":80}"
+      },
+      "tokens": 884,
+      "cost_usd": 0.0055,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘数据不足,无方向信号,观望\",\"confidence\":80}"
+    },
+    {
+      "time": "2026-04-22T00:27:18",
+      "prices": {
+        "RKLB": 91.58,
+        "RKLX": 50.07,
+        "RKLZ": 10.56
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "盘初无波动数据,无信号",
+        "confidence": 80,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘初无波动数据,无信号\",\"confidence\":80}"
+      },
+      "tokens": 880,
+      "cost_usd": 0.0054,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘初无波动数据,无信号\",\"confidence\":80}"
+    },
+    {
+      "time": "2026-04-22T00:42:20",
+      "prices": {
+        "RKLB": 91.72,
+        "RKLX": 50.24,
+        "RKLZ": 10.55
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "开盘首价无波动数据,等待趋势明朗",
+        "confidence": 80,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘首价无波动数据,等待趋势明朗\",\"confidence\":80}"
+      },
+      "tokens": 887,
+      "cost_usd": 0.005575,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘首价无波动数据,等待趋势明朗\",\"confidence\":80}"
+    },
+    {
+      "time": "2026-04-22T00:45:19",
+      "prices": {
+        "RKLB": 91.405,
+        "RKLX": 50.0,
+        "RKLZ": 10.6
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "开盘无波动数据,观望等信号",
+        "confidence": 80,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘无波动数据,观望等信号\",\"confidence\":80}"
+      },
+      "tokens": 882,
+      "cost_usd": 0.00545,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘无波动数据,观望等信号\",\"confidence\":80}"
+    },
+    {
+      "time": "2026-04-22T00:48:19",
+      "prices": {
+        "RKLB": 90.605,
+        "RKLX": 49.33,
+        "RKLZ": 10.75
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "开盘初无波动数据,观望等待信号",
+        "confidence": 70,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘初无波动数据,观望等待信号\",\"confidence\":70}"
+      },
+      "tokens": 884,
+      "cost_usd": 0.0055,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘初无波动数据,观望等待信号\",\"confidence\":70}"
+    },
+    {
+      "time": "2026-04-22T00:51:19",
+      "prices": {
+        "RKLB": 90.54,
+        "RKLX": 49.07,
+        "RKLZ": 10.78
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "盘前数据不足,等待方向信号",
+        "confidence": 80,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘前数据不足,等待方向信号\",\"confidence\":80}"
+      },
+      "tokens": 882,
+      "cost_usd": 0.00545,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘前数据不足,等待方向信号\",\"confidence\":80}"
+    },
+    {
+      "time": "2026-04-22T00:54:20",
+      "prices": {
+        "RKLB": 90.04,
+        "RKLX": 48.5,
+        "RKLZ": 10.9095
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "开盘首刻无波动数据,等待信号",
+        "confidence": 70,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘首刻无波动数据,等待信号\",\"confidence\":70}"
+      },
+      "tokens": 884,
+      "cost_usd": 0.0055,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘首刻无波动数据,等待信号\",\"confidence\":70}"
+    },
+    {
+      "time": "2026-04-22T00:57:21",
+      "prices": {
+        "RKLB": 89.4024,
+        "RKLX": 47.78
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "开盘无波动数据,信号不足",
+        "confidence": 80,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘无波动数据,信号不足\",\"confidence\":80}"
+      },
+      "tokens": 853,
+      "cost_usd": 0.005285,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘无波动数据,信号不足\",\"confidence\":80}"
+    },
+    {
+      "time": "2026-04-22T01:00:20",
+      "prices": {
+        "RKLB": 88.71,
+        "RKLX": 47.1,
+        "RKLZ": 11.235
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "开盘首轮无波动数据,观望待信号",
+        "confidence": 70,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘首轮无波动数据,观望待信号\",\"confidence\":70}"
+      },
+      "tokens": 885,
+      "cost_usd": 0.005525,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘首轮无波动数据,观望待信号\",\"confidence\":70}"
+    },
+    {
+      "time": "2026-04-22T01:09:20",
+      "prices": {
+        "RKLB": 88.57,
+        "RKLX": 46.935,
+        "RKLZ": 11.292
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "开盘首报价无波动数据,等待信号",
+        "confidence": 70,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘首报价无波动数据,等待信号\",\"confidence\":70}"
+      },
+      "tokens": 884,
+      "cost_usd": 0.0055,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘首报价无波动数据,等待信号\",\"confidence\":70}"
+    },
+    {
+      "time": "2026-04-22T01:14:47",
+      "prices": {
+        "RKLB": 88.9401,
+        "RKLX": 47.37,
+        "RKLZ": 11.21
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "盘初无波动数据,等待信号明确",
+        "confidence": 70,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘初无波动数据,等待信号明确\",\"confidence\":70}"
+      },
+      "tokens": 883,
+      "cost_usd": 0.005475,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘初无波动数据,等待信号明确\",\"confidence\":70}"
+    },
+    {
+      "time": "2026-04-22T01:23:46",
+      "prices": {
+        "RKLB": 89.26
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "盘前数据不足,等待明确信号",
+        "confidence": 20,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘前数据不足,等待明确信号\",\"confidence\":20}"
+      },
+      "tokens": 827,
+      "cost_usd": 0.005175,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘前数据不足,等待明确信号\",\"confidence\":20}"
+    },
+    {
+      "time": "2026-04-22T01:30:15",
+      "prices": {
+        "RKLB": 88.45,
+        "RKLX": 46.82,
+        "RKLZ": 11.3
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "盘前无波动数据,等待方向信号",
+        "confidence": 70,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘前无波动数据,等待方向信号\",\"confidence\":70}"
+      },
+      "tokens": 883,
+      "cost_usd": 0.005475,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘前无波动数据,等待方向信号\",\"confidence\":70}"
+    },
+    {
+      "time": "2026-04-22T01:33:14",
+      "prices": {
+        "RKLB": 89.1969,
+        "RKLX": 47.57,
+        "RKLZ": 11.1181
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "开盘无波动数据,缺乏信号",
+        "confidence": 70,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘无波动数据,缺乏信号\",\"confidence\":70}"
+      },
+      "tokens": 883,
+      "cost_usd": 0.005475,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘无波动数据,缺乏信号\",\"confidence\":70}"
+    },
+    {
+      "time": "2026-04-22T01:40:18",
+      "prices": {
+        "RKLB": 89.4,
+        "RKLX": 47.71,
+        "RKLZ": 11.09
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "盘前数据不足,无明确信号",
+        "confidence": 20,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘前数据不足,无明确信号\",\"confidence\":20}"
+      },
+      "tokens": 881,
+      "cost_usd": 0.005425,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘前数据不足,无明确信号\",\"confidence\":20}"
+    },
+    {
+      "time": "2026-04-22T01:55:17",
+      "prices": {
+        "RKLB": 89.17,
+        "RKLX": 47.5,
+        "RKLZ": 11.15
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "盘前数据不足,无信号观望",
+        "confidence": 70,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘前数据不足,无信号观望\",\"confidence\":70}"
+      },
+      "tokens": 881,
+      "cost_usd": 0.005425,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘前数据不足,无信号观望\",\"confidence\":70}"
+    },
+    {
+      "time": "2026-04-22T01:58:18",
+      "prices": {
+        "RKLB": 89.36,
+        "RKLX": 47.8,
+        "RKLZ": 11.0598
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "开盘首轮无波动数据,观望等信号",
+        "confidence": 80,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘首轮无波动数据,观望等信号\",\"confidence\":80}"
+      },
+      "tokens": 885,
+      "cost_usd": 0.005525,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"开盘首轮无波动数据,观望等信号\",\"confidence\":80}"
+    },
+    {
+      "time": "2026-04-22T02:01:17",
+      "prices": {
+        "RKLB": 89.68,
+        "RKLX": 48.07,
+        "RKLZ": 10.9801
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "盘前无波动无信号,等待开盘确认方向",
+        "confidence": 70,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘前无波动无信号,等待开盘确认方向\",\"confidence\":70}"
+      },
+      "tokens": 887,
+      "cost_usd": 0.005575,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘前无波动无信号,等待开盘确认方向\",\"confidence\":70}"
+    },
+    {
+      "time": "2026-04-22T02:22:18",
+      "prices": {
+        "RKLB": 88.47
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "盘前无波动信号,等待开盘方向",
+        "confidence": 70,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘前无波动信号,等待开盘方向\",\"confidence\":70}"
+      },
+      "tokens": 829,
+      "cost_usd": 0.005225,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘前无波动信号,等待开盘方向\",\"confidence\":70}"
+    },
+    {
+      "time": "2026-04-22T02:25:19",
+      "prices": {
+        "RKLB": 88.34,
+        "RKLX": 46.6001,
+        "RKLZ": 11.34
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "盘前无波动信号,等待开盘方向",
+        "confidence": 70,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘前无波动信号,等待开盘方向\",\"confidence\":70}"
+      },
+      "tokens": 884,
+      "cost_usd": 0.0055,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘前无波动信号,等待开盘方向\",\"confidence\":70}"
+    },
+    {
+      "time": "2026-04-22T02:28:18",
+      "prices": {
+        "RKLB": 88.36,
+        "RKLX": 46.64,
+        "RKLZ": 11.33
+      },
+      "decision": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "盘前无波动数据,无信号",
+        "confidence": 80,
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘前无波动数据,无信号\",\"confidence\":80}"
+      },
+      "tokens": 880,
+      "cost_usd": 0.0054,
+      "raw_first_100": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"reason\":\"盘前无波动数据,无信号\",\"confidence\":80}"
+    }
+  ],
+  "ai_tokens": 21941,
+  "ai_cost_usd": 0.136285,
+  "ai_calls": 25,
+  "total_commission": 0.0
+}

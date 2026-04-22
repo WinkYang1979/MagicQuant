@@ -1,0 +1,116 @@
+{
+  "project": "MagicQuant 慧投",
+  "last_updated": "2026-04-20",
+  "current_version": "0.2.1",
+  "next_version": "0.3.0",
+
+  "today_done": [
+    "=== 信号格式优化 ===",
+    "信号格式：每只股票加序号，级别说明只开头显示一次",
+    "HOLD 不显示操作建议块，BUY/SELL 显示手数+金额+手续费明细",
+    "技术指标加中文名，均线分行显示带括号说明",
+    "止损/目标价加涨跌幅百分比和ATR依据",
+    "仓位始终显示（无持仓显示0股$0.00）",
+
+    "=== AI 分析接入（双AI）===",
+    "Claude API：claude-sonnet-4-6，联网搜索新闻/期权/分析师评级",
+    "OpenAI API：gpt-4o + web_search_preview 联网",
+    "/detail 同时调用两个AI并行，各自独立推送结果",
+    "AI格式：【市场消息】→【综合判断】→【关键价位】→【风险提示】→【操作建议】",
+    "操作建议含具体股数和总金额",
+    "1小时缓存机制，/detail TICKER fresh 强制刷新",
+    "AI分析完成后写入 data/ai_analysis.json 供网页读取",
+
+    "=== 费用控制 ===",
+    "60秒冷却防重复触发",
+    "1小时缓存，重复调用直接推送缓存不计费",
+    "Claude搜索结果限制200字防token爆炸（从17¢降至3-5¢）",
+    "AI算力成本统一显示在所有AI输出底部",
+
+    "=== 盈亏警报升级 ===",
+    "区分盈利提醒/亏损警告，不同标题和emoji",
+    "警报触发后异步Claude给出具体操作建议（含股数）",
+    "指标带【中文名(数值)】格式，Agent深度分析按钮预留",
+    "按钮点击弹出 show_alert 确认框",
+
+    "=== 新增指令 ===",
+    "/ask TICKER 问题：随时咨询，Claude联网，150字以内",
+    "/summary：推送开发进度",
+    "/ai_positions /ai_trades /ai_report：AI虚拟操盘查询",
+
+    "=== AI 虚拟操盘 ===",
+    "新建 ai_trader.py：AI决策引擎，遵守PDT，计算手续费",
+    "起始资金 $20,000，与真实账户同等条件",
+    "定时推送后自动触发AI决策，有交易推送到群",
+
+    "=== Dashboard 网页全面升级 ===",
+    "左右分栏布局，卡片显示持仓盈亏",
+    "顶部风险警报横幅：止损红色，盈亏±5%黄色",
+    "五个标签页：技术指标/AI深度分析/市场消息/持仓风险/实时咨询",
+    "AI深度分析：按钮直接触发，1小时缓存，强制刷新",
+    "市场消息：自动提取AI分析中【市场消息】段落",
+    "实时咨询：输入框直接提问，历史10条",
+    "技术指标底部「⚡ 实时建议」按钮：5-10秒，结合K线使用",
+    "实时建议清理markdown，关键价位分行显示",
+    "网页按钮通过 /trigger 接口 → web_trigger.json → Bot轮询执行",
+    "server.py 新增：/ai_analysis /trigger /ask_result 接口",
+
+    "=== Bug 修复 ===",
+    "修复 cmd_detail NameError: price/name not defined",
+    "修复 save_ai_analysis 和 load_signals 函数合并的 bug",
+    "修复 call_claude 中 name 变量未定义",
+    "修复 index.html JS 多余大括号导致 SyntaxError",
+    "修复 server.py read_ai_analysis 函数缺失导致崩溃"
+  ],
+
+  "pending_issues": [
+    "ai_trader.py 已部署，等定时推送触发第一次运行验证",
+    "statement_parser.py PDF解析精度需用实际对账单验证",
+    "web_trigger.json 轮询机制已部署，需观察稳定性"
+  ],
+
+  "next_session": [
+    "【第一优先】接入 ai-hedge-fund Agent 框架",
+    "  GitHub: virattt/ai-hedge-fund",
+    "  风格：Graham价值 / Burry逆向 / Cathie Wood成长",
+    "  触发：点击「Agent 深度分析」按钮",
+    "  配置：config/agents.py 注册，不改主逻辑",
+    "【第二优先】AI虚拟操盘首次运行验证",
+    "  发 /ai_report 查看初始状态",
+    "  等第一次定时推送后查 /ai_trades",
+    "【第三优先】Dashboard 继续优化",
+    "  移动端适配（丈人可能用手机）",
+    "  考虑 TradingView 轻量K线嵌入",
+    "【完成后】version.py 更新至 v0.3.0"
+  ],
+
+  "file_locations": {
+    "bot_controller.py":   "C:\\MagicQuant\\bot\\bot_controller.py",
+    "signal_engine.py":    "C:\\MagicQuant\\core\\signal_engine.py",
+    "ai_trader.py":        "C:\\MagicQuant\\core\\ai_trader.py",
+    "statement_parser.py": "C:\\MagicQuant\\core\\statement_parser.py",
+    "settings.py":         "C:\\MagicQuant\\config\\settings.py",
+    "i18n.py":             "C:\\MagicQuant\\bot\\i18n.py",
+    "version.py":          "C:\\MagicQuant\\version.py",
+    "server.py":           "C:\\MagicQuant\\dashboard\\server.py",
+    "index.html":          "C:\\MagicQuant\\dashboard\\index.html",
+    "dev_notes.json":      "C:\\MagicQuant\\data\\dev_notes.json"
+  },
+
+  "architecture_notes": {
+    "ai_analysis_flow": "/detail → 技术面立即推 → Claude+OpenAI并行(1h缓存) → ai_analysis.json → 群+网页",
+    "quick_advice_flow": "网页实时建议 → /trigger → web_trigger.json → Bot轮询 → /ask → ask_results.json → 网页轮询显示",
+    "alert_flow": "check_alerts(60s) → 盈亏/止损触发 → 推送警报 → 异步AI建议",
+    "ai_trader_flow": "scheduled_push → ai_run_once() → Claude决策 → 虚拟交易 → 推送",
+    "cache_policy": "AI分析1小时缓存，fresh参数强制刷新，快速建议不缓存",
+    "claude_model": "claude-sonnet-4-6，联网用 web_search_20250305",
+    "openai_model": "gpt-4o，联网用 web_search_preview，走 /v1/responses",
+    "fee_structure": "买$1.29 / 卖$1.31（富途AU实测）"
+  },
+
+  "api_keys_status": {
+    "claude": "已配置，余额 US$20，模型 claude-sonnet-4-6",
+    "openai": "已配置，已充值，模型 gpt-4o",
+    "futu": "本地 FutuOpenD，正常运行"
+  }
+}

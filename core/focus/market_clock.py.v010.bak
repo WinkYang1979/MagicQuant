@@ -1,0 +1,195 @@
+"""
+════════════════════════════════════════════════════════════════════
+  MagicQuant — market_clock.py
+  VERSION : v0.1.0
+  DATE    : 2026-04-22
+  CHANGES :
+    - 美股市场状态判断:regular(盘中) / pre(盘前) / post(盘后) / closed(休市)
+    - 用 Python 3.9+ 自带 zoneinfo,自动处理夏令时,无外部依赖
+    - 2026 年美股节假日硬编码(每年 1 月更新一次)
+    - 提供下次开盘时间 + 倒计时
+  USAGE :
+    from core.focus.market_clock import get_market_status, format_market_status
+    status = get_market_status()  # "regular" / "pre" / "post" / "closed"
+    print(format_market_status())  # "🟢 美股盘中  ·  14:30 ET"
+  OWNER   : laoyang
+════════════════════════════════════════════════════════════════════
+"""
+
+from datetime import datetime, timedelta, time as dtime
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    # Python 3.8 兜底(不推荐)
+    from backports.zoneinfo import ZoneInfo
+
+ET = ZoneInfo("America/New_York")
+
+# 2026 年美股休市日(每年更新,参考 NYSE Calendar)
+US_HOLIDAYS = {
+    # 2026
+    "2026-01-01",   # 元旦
+    "2026-01-19",   # MLK Day
+    "2026-02-16",   # Presidents Day
+    "2026-04-03",   # Good Friday
+    "2026-05-25",   # Memorial Day
+    "2026-06-19",   # Juneteenth
+    "2026-07-03",   # Independence Day (观察日,7/4 是周六)
+    "2026-09-07",   # Labor Day
+    "2026-11-26",   # Thanksgiving
+    "2026-12-25",   # Christmas
+    # 2027(提前加上,避免跨年忘更新)
+    "2027-01-01",
+    "2027-01-18",
+    "2027-02-15",
+    "2027-03-26",
+    "2027-05-31",
+    "2027-06-18",   # Juneteenth observed (6/19 周六)
+    "2027-07-05",   # Independence Day observed (7/4 周日)
+    "2027-09-06",
+    "2027-11-25",
+    "2027-12-24",   # Christmas observed (12/25 周六)
+}
+
+# 交易时段定义 (ET)
+PRE_MARKET_OPEN   = dtime(4, 0)    # 盘前 4:00
+REGULAR_OPEN      = dtime(9, 30)   # 盘中开盘
+REGULAR_CLOSE     = dtime(16, 0)   # 盘中收盘
+POST_MARKET_CLOSE = dtime(20, 0)   # 盘后 20:00
+
+
+def _is_trading_day(d: datetime) -> bool:
+    """判断是否为美股交易日"""
+    if d.weekday() >= 5:   # 5=周六, 6=周日
+        return False
+    if d.strftime("%Y-%m-%d") in US_HOLIDAYS:
+        return False
+    return True
+
+
+def get_market_status(now=None) -> str:
+    """
+    返回美股当前市场状态:
+      "regular" — 盘中 9:30-16:00 ET
+      "pre"     — 盘前 4:00-9:30 ET
+      "post"    — 盘后 16:00-20:00 ET
+      "closed"  — 休市(夜间/周末/节假日)
+    """
+    if now is None:
+        now = datetime.now(ET)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=ET)
+    else:
+        now = now.astimezone(ET)
+
+    if not _is_trading_day(now):
+        return "closed"
+
+    t = now.time()
+    if PRE_MARKET_OPEN <= t < REGULAR_OPEN:
+        return "pre"
+    if REGULAR_OPEN <= t < REGULAR_CLOSE:
+        return "regular"
+    if REGULAR_CLOSE <= t < POST_MARKET_CLOSE:
+        return "post"
+    return "closed"
+
+
+def is_market_open(strict=False) -> bool:
+    """
+    strict=True:只有盘中算开盘
+    strict=False:盘前盘后也算开盘(Moomoo AU 支持延长交易)
+    """
+    status = get_market_status()
+    if strict:
+        return status == "regular"
+    return status in ("regular", "pre", "post")
+
+
+def market_status_emoji(status: str) -> str:
+    return {
+        "regular": "🟢",
+        "pre":     "🟡",
+        "post":    "🟠",
+        "closed":  "🌙",
+    }.get(status, "⚪")
+
+
+def market_status_name_zh(status: str) -> str:
+    return {
+        "regular": "盘中",
+        "pre":     "盘前",
+        "post":    "盘后",
+        "closed":  "休市",
+    }.get(status, "未知")
+
+
+def next_market_open(now=None) -> datetime:
+    """返回下一次盘中开盘(9:30 ET)的 datetime"""
+    if now is None:
+        now = datetime.now(ET)
+
+    # 今天还没开盘且是交易日
+    today_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    if now < today_open and _is_trading_day(now):
+        return today_open
+
+    # 找下一个交易日
+    candidate = (now + timedelta(days=1)).replace(hour=9, minute=30, second=0, microsecond=0)
+    for _ in range(10):
+        if _is_trading_day(candidate):
+            return candidate
+        candidate += timedelta(days=1)
+    return None
+
+
+def time_until_open(now=None):
+    """距离下次盘中开盘的 timedelta"""
+    if now is None:
+        now = datetime.now(ET)
+    next_o = next_market_open(now)
+    if next_o is None:
+        return None
+    return next_o - now
+
+
+def format_time_delta(td: timedelta) -> str:
+    """格式化倒计时:'3天 5小时 12分'"""
+    if td is None or td.total_seconds() < 0:
+        return "—"
+    total_mins = int(td.total_seconds() / 60)
+    days = total_mins // (24 * 60)
+    hours = (total_mins % (24 * 60)) // 60
+    mins = total_mins % 60
+    parts = []
+    if days > 0:
+        parts.append(f"{days}天")
+    if hours > 0:
+        parts.append(f"{hours}小时")
+    if mins > 0 or not parts:
+        parts.append(f"{mins}分")
+    return " ".join(parts)
+
+
+def format_market_status(now=None) -> str:
+    """生成市场状态单行摘要"""
+    if now is None:
+        now = datetime.now(ET)
+    status = get_market_status(now)
+    emoji = market_status_emoji(status)
+    name = market_status_name_zh(status)
+    et_time = now.strftime("%H:%M ET")
+
+    if status == "closed":
+        tu = time_until_open(now)
+        if tu:
+            return f"{emoji} 美股{name}  ·  {et_time}  ·  距开盘 {format_time_delta(tu)}"
+    return f"{emoji} 美股{name}  ·  {et_time}"
+
+
+if __name__ == "__main__":
+    print(format_market_status())
+    print(f"盘中开盘?{is_market_open(strict=True)}")
+    print(f"宽松开盘?{is_market_open(strict=False)}")
+    print(f"下次开盘:{next_market_open()}")
+    print(f"距离:{format_time_delta(time_until_open())}")

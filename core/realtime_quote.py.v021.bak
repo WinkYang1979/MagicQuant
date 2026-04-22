@@ -1,0 +1,355 @@
+"""
+MagicQuant 慧投 — Realtime Quote Module v0.2.2
+Dare to dream. Data to win.
+
+VERSION: v0.2.2
+DATE:    2026-04-22
+CHANGES:
+  v0.2.2 (2026-04-22):
+    - 【修复】夜盘/盘前/盘后时段 last_price 卡在 RTH 收盘价的问题
+    - fetch_one() 根据美东时间自动选择正确的价格字段:
+        RTH 盘中 → last_price
+        盘前     → pre_price
+        盘后     → after_price
+        夜盘     → overnight_price
+    - 返回新增 session 字段:"RTH"/"PRE"/"AFTER"/"OVERNIGHT"/"CLOSED"
+    - prev_close 逻辑不变 (夜盘/盘前/盘后涨跌幅都相对 RTH 收盘价)
+    - 向下兼容:对外接口字段完全一致,signal_engine/focus_manager 无需改动
+  v0.2.1:
+    - 首版 Futu 常驻连接 + 并发批量
+
+DEPENDS:
+  config.settings (FUTU_HOST, FUTU_PORT) >= v0.1.0
+  moomoo-api 或 futu-api
+
+职责：
+  1) 维护一个常驻的 FutuOpenD QuoteContext
+  2) 提供毫秒级实时快照查询 (智能选时段价)
+  3) 并发批量刷新多只票
+  4) 连接失效自动重连
+  5) Futu 挂时优雅降级 (返回 None)
+"""
+
+import time
+import threading
+from datetime import datetime, timezone, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+try:
+    from moomoo import OpenQuoteContext, RET_OK
+except ImportError:
+    from futu import OpenQuoteContext, RET_OK
+
+from config.settings import FUTU_HOST, FUTU_PORT
+
+
+# ══════════════════════════════════════════════════════════════════
+#  美东时段识别 (不依赖 pytz,用 UTC 偏移近似)
+# ══════════════════════════════════════════════════════════════════
+#  美股时段 (美东 ET):
+#    夜盘   20:00 - 03:50 (次日)   overnight_price
+#    盘前   04:00 - 09:30          pre_price
+#    盘中   09:30 - 16:00          last_price
+#    盘后   16:00 - 20:00          after_price
+#    休市   03:50 - 04:00 (空档)   退回 last_price
+#
+#  DST 处理: 美国夏令时 3 月第二个周日 - 11 月第一个周日,UTC-4;
+#  其他时间 UTC-5。简化为按月份粗略判断,不影响时段识别 (容错 ±1 小时)。
+
+def _et_now() -> datetime:
+    """返回当前美东时间 (naive datetime)。"""
+    utc_now = datetime.now(timezone.utc)
+    # 3-11 月算夏令时 UTC-4,其他 UTC-5。边缘日容错足够
+    month = utc_now.month
+    offset = -4 if 3 <= month <= 11 else -5
+    et = utc_now + timedelta(hours=offset)
+    return et.replace(tzinfo=None)
+
+
+def _detect_session(et_dt: datetime = None) -> str:
+    """
+    根据美东时间判断当前交易时段。
+    返回: "RTH" / "PRE" / "AFTER" / "OVERNIGHT" / "CLOSED"
+    """
+    if et_dt is None:
+        et_dt = _et_now()
+    t = et_dt.time()
+    # 跨零点的夜盘要分段处理
+    from datetime import time as dt_time
+    if t >= dt_time(20, 0) or t < dt_time(3, 50):
+        return "OVERNIGHT"
+    if dt_time(3, 50) <= t < dt_time(4, 0):
+        return "CLOSED"  # 极短空档
+    if dt_time(4, 0) <= t < dt_time(9, 30):
+        return "PRE"
+    if dt_time(9, 30) <= t < dt_time(16, 0):
+        return "RTH"
+    if dt_time(16, 0) <= t < dt_time(20, 0):
+        return "AFTER"
+    return "CLOSED"
+
+
+def _pick_price(row, session: str) -> tuple:
+    """
+    按时段从 snapshot row 选合适的价格字段。
+    返回 (price, session_used) — session_used 是实际取到数据的时段。
+
+    Fallback 策略:
+      OVERNIGHT → overnight_price → after_price → last_price
+      AFTER     → after_price → last_price
+      PRE       → pre_price → last_price
+      RTH       → last_price
+      CLOSED    → last_price (RTH 收盘价)
+    """
+    def _safe(field):
+        """读字段,nan/None/0 都返回 None"""
+        if field not in row.index:
+            return None
+        v = row[field]
+        try:
+            vf = float(v)
+            if vf != vf or vf == 0:  # NaN 检测 + 非零
+                return None
+            return vf
+        except (TypeError, ValueError):
+            return None
+
+    last = _safe("last_price")
+
+    if session == "OVERNIGHT":
+        p = _safe("overnight_price")
+        if p is not None:
+            return p, "OVERNIGHT"
+        p = _safe("after_price")
+        if p is not None:
+            return p, "AFTER"
+        return last, "RTH"
+
+    if session == "AFTER":
+        p = _safe("after_price")
+        if p is not None:
+            return p, "AFTER"
+        return last, "RTH"
+
+    if session == "PRE":
+        p = _safe("pre_price")
+        if p is not None:
+            return p, "PRE"
+        return last, "RTH"
+
+    # RTH / CLOSED
+    return last, "RTH"
+
+
+# ══════════════════════════════════════════════════════════════════
+#  QuoteClient — 单例,常驻连接
+# ══════════════════════════════════════════════════════════════════
+
+class QuoteClient:
+    """常驻 Futu Quote 连接,线程安全。"""
+
+    def __init__(self, host=FUTU_HOST, port=FUTU_PORT):
+        self.host = host
+        self.port = port
+        self._ctx = None
+        self._lock = threading.Lock()
+        self._last_err_at = 0
+        self._err_cooldown = 30
+        self._connect()
+
+    # ── 连接管理 ──────────────────────────────────────────────────
+    def _connect(self):
+        try:
+            if self._ctx is not None:
+                try:
+                    self._ctx.close()
+                except:
+                    pass
+            self._ctx = OpenQuoteContext(host=self.host, port=self.port)
+            print(f"  [Quote v0.2.2] Connected to FutuOpenD {self.host}:{self.port}")
+            self._last_err_at = 0
+            return True
+        except Exception as e:
+            self._ctx = None
+            self._last_err_at = time.time()
+            print(f"  [Quote] Connect failed: {e}")
+            return False
+
+    def _ensure(self):
+        if self._ctx is not None:
+            return True
+        if time.time() - self._last_err_at < self._err_cooldown:
+            return False
+        with self._lock:
+            if self._ctx is None:
+                return self._connect()
+        return True
+
+    def close(self):
+        with self._lock:
+            if self._ctx is not None:
+                try:
+                    self._ctx.close()
+                except:
+                    pass
+                self._ctx = None
+                print("  [Quote] Closed")
+
+    # ── 核心查询 ──────────────────────────────────────────────────
+    def fetch_one(self, ticker: str, timeout: float = 3.0) -> dict | None:
+        """
+        获取单票实时快照。失败返回 None。
+
+        v0.2.2 起,根据美东时段自动选时段价。返回字段:
+            ticker, price, prev_close, change, change_pct, volume,
+            update_time, age_sec, fetched_at,
+            session        # "RTH"/"PRE"/"AFTER"/"OVERNIGHT"/"CLOSED"
+            session_used   # 实际取到价格的时段 (fallback 后的)
+            rth_close      # RTH 收盘价 (夜盘时用于对比)
+        """
+        if not self._ensure():
+            return None
+
+        try:
+            with self._lock:
+                ret, snap = self._ctx.get_market_snapshot([ticker])
+            if ret != RET_OK or snap is None or len(snap) == 0:
+                return None
+
+            row = snap.iloc[0]
+            prev  = float(row["prev_close_price"])
+            update_time = str(row["update_time"])
+            rth_close = float(row["last_price"])  # RTH 收盘价,夜盘时保留
+
+            # ★ v0.2.2 核心:按美东时段选价
+            session = _detect_session()
+            price, session_used = _pick_price(row, session)
+
+            if price is None:
+                return None
+
+            # age 计算:update_time 是美东时间,对齐到美东 now
+            age_sec = -1
+            try:
+                dt_q = datetime.strptime(update_time, "%Y-%m-%d %H:%M:%S")
+                age_sec = max(0, int((_et_now() - dt_q).total_seconds()))
+            except:
+                pass
+
+            return {
+                "ticker":       ticker,
+                "price":        round(price, 4),
+                "prev_close":   round(prev, 4),
+                "change":       round(price - prev, 4),
+                "change_pct":   round((price - prev) / prev * 100, 2) if prev else 0.0,
+                "volume":       int(row["volume"]),
+                "update_time":  update_time,
+                "age_sec":      age_sec,
+                "fetched_at":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "session":      session,
+                "session_used": session_used,
+                "rth_close":    round(rth_close, 4),
+            }
+        except Exception as e:
+            print(f"  [Quote] fetch_one({ticker}) error: {e}")
+            with self._lock:
+                self._ctx = None
+                self._last_err_at = time.time()
+            return None
+
+    def fetch_many(self, tickers: list, max_workers: int = 4) -> dict:
+        """批量并发拉取。返回 {ticker: quote_dict or None}"""
+        result = {tk: None for tk in tickers}
+        if not tickers:
+            return result
+        if not self._ensure():
+            return result
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futs = {pool.submit(self.fetch_one, tk): tk for tk in tickers}
+            for fut in as_completed(futs, timeout=10):
+                tk = futs[fut]
+                try:
+                    result[tk] = fut.result()
+                except Exception as e:
+                    print(f"  [Quote] batch error on {tk}: {e}")
+                    result[tk] = None
+        return result
+
+
+# ══════════════════════════════════════════════════════════════════
+#  单例入口
+# ══════════════════════════════════════════════════════════════════
+
+_client_singleton: QuoteClient | None = None
+_singleton_lock = threading.Lock()
+
+
+def get_client() -> QuoteClient:
+    global _client_singleton
+    if _client_singleton is None:
+        with _singleton_lock:
+            if _client_singleton is None:
+                _client_singleton = QuoteClient()
+    return _client_singleton
+
+
+def close_client():
+    global _client_singleton
+    if _client_singleton is not None:
+        _client_singleton.close()
+        _client_singleton = None
+
+
+# ══════════════════════════════════════════════════════════════════
+#  辅助：把实时 quote 合并到 signal dict
+# ══════════════════════════════════════════════════════════════════
+
+def merge_realtime_into_signal(signal: dict, quote: dict | None) -> dict:
+    """
+    把实时 quote 覆盖到 signal 的价格字段。
+    v0.2.2: 额外透传 session / session_used / rth_close。
+    """
+    if not quote:
+        signal["price_is_live"] = False
+        signal.setdefault("price_at", signal.get("update_time", ""))
+        return signal
+
+    signal["price"]         = quote["price"]
+    signal["prev_close"]    = quote["prev_close"]
+    signal["change"]        = quote["change"]
+    signal["change_pct"]    = quote["change_pct"]
+    signal["volume"]        = quote["volume"]
+    signal["price_at"]      = quote["update_time"]
+    signal["quote_age_sec"] = quote["age_sec"]
+    signal["price_is_live"] = True
+    # v0.2.2 新增透传
+    signal["session"]       = quote.get("session", "RTH")
+    signal["session_used"]  = quote.get("session_used", "RTH")
+    signal["rth_close"]     = quote.get("rth_close")
+    return signal
+
+
+if __name__ == "__main__":
+    import sys
+    client = get_client()
+
+    test_tickers = ["US.RKLB", "US.RKLX", "US.RKLZ"] if len(sys.argv) < 2 else sys.argv[1:]
+    print(f"\n  美东时间: {_et_now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  当前时段: {_detect_session()}")
+    print(f"  测试: {test_tickers}\n")
+
+    t0 = time.time()
+    quotes = client.fetch_many(test_tickers)
+    elapsed = time.time() - t0
+
+    for tk, q in quotes.items():
+        if q:
+            tag = q["session_used"]
+            print(f"  {tk}: ${q['price']}  {q['change']:+.3f} ({q['change_pct']:+.2f}%)  "
+                  f"[{tag}]  RTH收盘=${q['rth_close']}  age={q['age_sec']}s")
+        else:
+            print(f"  {tk}: ❌ 获取失败")
+
+    print(f"\n  Total: {elapsed:.2f}s")
+    close_client()

@@ -1,0 +1,36 @@
+# MagicQuant .gitignore
+# 放置位置: C:\MagicQuant\.gitignore
+
+# 凭证(绝对不入库)
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+venv_agents/
+.venv/
+*.egg-info/
+
+# 数据(本地)
+data/
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 备份文件
+*.backup_*
+*.bak
+*~

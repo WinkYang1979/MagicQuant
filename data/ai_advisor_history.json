@@ -1,0 +1,510 @@
+[
+  {
+    "timestamp": "2026-04-22T01:15:37",
+    "trigger": {
+      "type": "manual_consult",
+      "reason": "主动询问 AI 意见",
+      "severity": "manual",
+      "ticker": "RKLB"
+    },
+    "market": {
+      "prices": {},
+      "indicators": {}
+    },
+    "portfolio": {
+      "cash": 20000.0,
+      "positions": {
+        "TSLL": {
+          "qty": 251.0,
+          "cost_basis": 22.27,
+          "current_price": 13.2
+        }
+      }
+    },
+    "advisors": {
+      "gpt_5": {
+        "parse_ok": false,
+        "raw": "API 错误: HTTP Error 400: Bad Request",
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败",
+        "confidence": 0
+      },
+      "deepseek": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "price": null,
+        "reason": "无明确交易信号，市场数据不足，观望为佳。",
+        "confidence": 85,
+        "risk": "强行交易易被手续费侵蚀利润。",
+        "parse_ok": true,
+        "raw": "{\n  \"action\": \"HOLD\",\n  \"ticker\": null,\n  \"qty\": 0,\n  \"price\": null,\n  \"reason\": \"无明确交易信号，市场数据不足，观望为佳。\",\n  \"confidence\": 85,\n  \"risk\": \"强行交易易被手续费侵蚀利润。\"\n}",
+        "cost_usd": 0.00024118000000000002,
+        "tokens": 675
+      },
+      "claude_haiku": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "price": null,
+        "reason": "TSLL持仓深度亏损,需等待明确反弹信号再操作,当前无新增RKLB信号",
+        "confidence": 85,
+        "risk": "TSLL已亏40%,追加操作可能加重损失,建议观望等待止损或反弹机会",
+        "parse_ok": true,
+        "raw": "```json\n{\n  \"action\": \"HOLD\",\n  \"ticker\": null,\n  \"qty\": 0,\n  \"price\": null,\n  \"reason\": \"TSLL持仓深度亏损,需等待明确反弹信号再操作,当前无新增RKLB信号\",\n  \"confidence\": 85,\n  \"risk\": \"TSLL已亏40%,追加操作可能加重损失,建议观望等待止损或反弹机会\"\n}\n```\n\n**关键点分析:**\n\n1. **现有持仓问题**  \n   - TSLL (3x 做多 TSLA) 浮亏 -40.73%，这是 3x 杠杆 ETF，波动剧烈  \n   - 不在 RKLB 系列交",
+        "cost_usd": 0.002866,
+        "tokens": 1266
+      }
+    },
+    "leader": {
+      "final_action": "HOLD",
+      "final_ticker": null,
+      "final_qty": 0,
+      "final_price": null,
+      "final_reason": "两位顾问均建议观望,GPT-5响应失败。当前无Focus自动触发信号,仅为主动咨询。TSLL深度亏损但无新增RKLB机会,缺乏明确交易依据,保持观望最稳妥。",
+      "agreement": "共识",
+      "risk_warning": "TSLL浮亏40%,需制定止损或加仓摊平计划。",
+      "differs_from_advisors": false,
+      "confidence": 80,
+      "parse_ok": true,
+      "raw": "{\"final_action\":\"HOLD\",\"final_ticker\":null,\"final_qty\":0,\"final_price\":null,\"final_reason\":\"两位顾问均建议观望,GPT-5响应失败。当前无Focus自动触发信号,仅为主动咨询。TSLL深度亏损但无新增RKLB机会,缺乏明确交易依据,保持观望最稳妥。\",\"agreement\":\"共识\",\"risk_warning\":\"TSLL浮亏40%,需制定止损或加仓摊平计划。\",\"differs_from_advisors\":false,\"confidence\":80}",
+      "cost_usd": 0.009850000000000001,
+      "tokens": 1206
+    },
+    "total_cost_usd": 0.01296,
+    "total_tokens": 3147,
+    "duration_ms": 9254
+  },
+  {
+    "timestamp": "2026-04-22T01:30:18",
+    "trigger": {
+      "type": "manual_consult",
+      "reason": "主动询问 AI 意见",
+      "severity": "manual",
+      "ticker": "RKLB"
+    },
+    "market": {
+      "prices": {},
+      "indicators": {}
+    },
+    "portfolio": {
+      "cash": 20000.0,
+      "positions": {
+        "TSLL": {
+          "qty": 251.0,
+          "cost_basis": 22.27,
+          "current_price": 13.13
+        }
+      }
+    },
+    "advisors": {
+      "kimi": {
+        "parse_ok": false,
+        "raw": "API 错误: HTTP 401 @ api.moonshot.ai: {\"error\":{\"message\":\"Invalid Authentication\",\"type\":\"invalid_authenticat",
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败",
+        "confidence": 0
+      },
+      "gpt_5": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "price": null,
+        "reason": "缺少RKLB信号与RKLX/RKLZ价格，无法判断方向",
+        "confidence": 96,
+        "risk": "数据不足，勿凭猜测交易",
+        "parse_ok": true,
+        "raw": "{\n  \"action\": \"HOLD\",\n  \"ticker\": null,\n  \"qty\": 0,\n  \"price\": null,\n  \"reason\": \"缺少RKLB信号与RKLX/RKLZ价格，无法判断方向\",\n  \"confidence\": 96,\n  \"risk\": \"数据不足，勿凭猜测交易\"\n}",
+        "cost_usd": 0.0037175000000000003,
+        "tokens": 1102
+      },
+      "claude_haiku": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "price": null,
+        "reason": "当前无 RKLB 数据,无法判断 RKLB 走势信号。账户持仓为 TSLL(非 RKLX/RKLZ),暂无操作理由。",
+        "confidence": 50,
+        "risk": "缺少 RKLB 行情数据,无法给出有效交易决策。建议提供 RKLB 实时价格、K 线、技术面。",
+        "parse_ok": true,
+        "raw": "```json\n{\n  \"action\": \"HOLD\",\n  \"ticker\": null,\n  \"qty\": 0,\n  \"price\": null,\n  \"reason\": \"当前无 RKLB 数据,无法判断 RKLB 走势信号。账户持仓为 TSLL(非 RKLX/RKLZ),暂无操作理由。\",\n  \"confidence\": 0,\n  \"risk\": \"缺少 RKLB 行情数据,无法给出有效交易决策。建议提供 RKLB 实时价格、K 线、技术面。\"\n}\n```\n\n---\n\n**补充说明:**\n\n1. **缺少关键信息** — 你的触发没有提供 RKLB 的实时行情(价格、走势、支撑阻力等",
+        "cost_usd": 0.003528,
+        "tokens": 1928
+      },
+      "deepseek": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "price": null,
+        "reason": "无明确 RKLB 波段信号，主动询问不足以构成交易依据，观望等待。",
+        "confidence": 85,
+        "risk": "强行交易易被手续费侵蚀利润，且无明确方向。",
+        "parse_ok": true,
+        "raw": "```json\n{\n  \"action\": \"HOLD\",\n  \"ticker\": null,\n  \"qty\": 0,\n  \"price\": null,\n  \"reason\": \"无明确 RKLB 波段信号，主动询问不足以构成交易依据，观望等待。\",\n  \"confidence\": 85,\n  \"risk\": \"强行交易易被手续费侵蚀利润，且无明确方向。\"\n}\n```",
+        "cost_usd": 0.00037432000000000003,
+        "tokens": 1122
+      }
+    },
+    "leader": {
+      "final_action": "HOLD",
+      "final_ticker": null,
+      "final_qty": 0,
+      "final_price": null,
+      "final_reason": "当前无 RKLB 信号数据,也无 RKLX/RKLZ 报价,三位顾问一致建议观望。账户持仓为 TSLL 与本策略无关,无操作依据,等待明确信号再行动。",
+      "agreement": "共识",
+      "risk_warning": "无数据强行交易风险极高,切勿凭感觉开仓",
+      "differs_from_advisors": false,
+      "confidence": 90,
+      "parse_ok": true,
+      "raw": "{\"final_action\":\"HOLD\",\"final_ticker\":null,\"final_qty\":0,\"final_price\":null,\"final_reason\":\"当前无 RKLB 信号数据,也无 RKLX/RKLZ 报价,三位顾问一致建议观望。账户持仓为 TSLL 与本策略无关,无操作依据,等待明确信号再行动。\",\"agreement\":\"共识\",\"risk_warning\":\"无数据强行交易风险极高,切勿凭感觉开仓\",\"differs_from_advisors\":false,\"confidence\":90}",
+      "cost_usd": 0.0123,
+      "tokens": 1732
+    },
+    "total_cost_usd": 0.01992,
+    "total_tokens": 5884,
+    "duration_ms": 9114
+  },
+  {
+    "timestamp": "2026-04-22T01:41:00",
+    "trigger": {
+      "type": "manual_consult",
+      "reason": "主动询问 AI 意见",
+      "severity": "manual",
+      "ticker": "RKLB"
+    },
+    "market": {
+      "prices": {
+        "RKLB": {
+          "price": 89.28,
+          "low": 89.26,
+          "high": 89.465
+        },
+        "RKLX": {
+          "price": 47.68,
+          "low": 47.58,
+          "high": 47.81
+        },
+        "RKLZ": {
+          "price": 11.0999,
+          "low": 11.09,
+          "high": 11.11
+        }
+      },
+      "indicators": {}
+    },
+    "portfolio": {
+      "cash": 20000.0,
+      "positions": {
+        "TSLL": {
+          "qty": 251.0,
+          "cost_basis": 22.27,
+          "current_price": 13.11
+        }
+      }
+    },
+    "advisors": {
+      "kimi": {
+        "parse_ok": false,
+        "raw": "API 错误: HTTP 401 @ api.moonshot.ai: {\"error\":{\"message\":\"Invalid Authentication\",\"type\":\"invalid_authenticat",
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "reason": "调用失败",
+        "confidence": 0
+      },
+      "gpt_5": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "price": null,
+        "reason": "RKLB 仅窄幅震荡，方向不清晰，暂不交易RKLX/RKLZ",
+        "confidence": 86,
+        "risk": "区间过窄，易被点差和手续费吞噬",
+        "parse_ok": true,
+        "raw": "{\"action\":\"HOLD\",\"ticker\":null,\"qty\":0,\"price\":null,\"reason\":\"RKLB 仅窄幅震荡，方向不清晰，暂不交易RKLX/RKLZ\",\"confidence\":86,\"risk\":\"区间过窄，易被点差和手续费吞噬\"}",
+        "cost_usd": 0.00379,
+        "tokens": 1166
+      },
+      "claude_haiku": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "price": null,
+        "reason": "RKLB 当前价格在日内窄幅震荡($89.26-$89.47),无明显方向信号,趋势不清晰,不足以触发 RKLX/RKLZ 操作",
+        "confidence": 50,
+        "risk": "现有 TSLL 浮亏严重(-41%),现金充足但应等待高概率信号再动作,避免追加亏损",
+        "parse_ok": true,
+        "raw": "```json\n{\n  \"action\": \"HOLD\",\n  \"ticker\": null,\n  \"qty\": 0,\n  \"price\": null,\n  \"reason\": \"RKLB 当前价格在日内窄幅震荡($89.26-$89.47),无明显方向信号,趋势不清晰,不足以触发 RKLX/RKLZ 操作\",\n  \"confidence\": 0,\n  \"risk\": \"现有 TSLL 浮亏严重(-41%),现金充足但应等待高概率信号再动作,避免追加亏损\"\n}\n```\n\n**补充说明**(不是输出):\n- RKLB 目前在 $89.26-$89.47 狭窄区间震荡，日内无明确涨跌突破\n- 波段",
+        "cost_usd": 0.0033290000000000004,
+        "tokens": 1953
+      },
+      "deepseek": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "price": null,
+        "reason": "RKLB价格窄幅震荡，无明显波段顶底信号，观望等待清晰方向。",
+        "confidence": 85,
+        "risk": "强行交易易被手续费侵蚀利润，且2x杠杆ETF日内波动风险高。",
+        "parse_ok": true,
+        "raw": "```json\n{\n  \"action\": \"HOLD\",\n  \"ticker\": null,\n  \"qty\": 0,\n  \"price\": null,\n  \"reason\": \"RKLB价格窄幅震荡，无明显波段顶底信号，观望等待清晰方向。\",\n  \"confidence\": 85,\n  \"risk\": \"强行交易易被手续费侵蚀利润，且2x杠杆ETF日内波动风险高。\"\n}\n```",
+        "cost_usd": 0.00039926,
+        "tokens": 1199
+      }
+    },
+    "leader": {
+      "final_action": "HOLD",
+      "final_ticker": null,
+      "final_qty": 0,
+      "final_price": null,
+      "final_reason": "RKLB今日区间仅$89.26-$89.47,波幅不足0.25%,无明确方向信号。三位顾问一致观望,无足够依据进场RKLX或RKLZ,等待突破信号。",
+      "agreement": "共识",
+      "risk_warning": "窄幅震荡易假突破,勿急于追单",
+      "differs_from_advisors": false,
+      "confidence": 85,
+      "parse_ok": true,
+      "raw": "{\"final_action\":\"HOLD\",\"final_ticker\":null,\"final_qty\":0,\"final_price\":null,\"final_reason\":\"RKLB今日区间仅$89.26-$89.47,波幅不足0.25%,无明确方向信号。三位顾问一致观望,无足够依据进场RKLX或RKLZ,等待突破信号。\",\"agreement\":\"共识\",\"risk_warning\":\"窄幅震荡易假突破,勿急于追单\",\"differs_from_advisors\":false,\"confidence\":85}",
+      "cost_usd": 0.012515,
+      "tokens": 1815
+    },
+    "total_cost_usd": 0.02003,
+    "total_tokens": 6133,
+    "duration_ms": 9651
+  },
+  {
+    "timestamp": "2026-04-22T15:29:28",
+    "trigger": {
+      "type": "manual_consult",
+      "reason": "主动询问 AI 意见",
+      "severity": "manual",
+      "ticker": "RKLB"
+    },
+    "market": {
+      "prices": {
+        "RKLB": {
+          "price": 89.1,
+          "low": 89.07,
+          "high": 89.1
+        },
+        "RKLX": {
+          "price": 47.33,
+          "low": 47.32,
+          "high": 47.33
+        },
+        "RKLZ": {
+          "price": 11.03,
+          "low": 11.03,
+          "high": 11.03
+        }
+      },
+      "indicators": {}
+    },
+    "portfolio": {
+      "cash": 20000.0,
+      "positions": {
+        "TSLL": {
+          "qty": 251,
+          "cost_basis": 22.275,
+          "current_price": 13.09
+        },
+        "RKLZ": {
+          "qty": 100,
+          "cost_basis": 11.43,
+          "current_price": 11.03
+        }
+      }
+    },
+    "advisors": {
+      "gpt_5": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "price": null,
+        "reason": "RKLB横盘无方向，RKLZ小亏不宜追单",
+        "confidence": 72,
+        "risk": "价差极窄，易被手续费吃掉",
+        "parse_ok": true,
+        "raw": "{\n  \"action\": \"HOLD\",\n  \"ticker\": null,\n  \"qty\": 0,\n  \"price\": null,\n  \"reason\": \"RKLB横盘无方向，RKLZ小亏不宜追单\",\n  \"confidence\": 72,\n  \"risk\": \"价差极窄，易被手续费吃掉\"\n}",
+        "cost_usd": 0.0042975,
+        "tokens": 1329
+      },
+      "claude_haiku": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "price": null,
+        "reason": "RKLB 在 $89.10 区间震荡,无明显方向信号。现持 RKLZ 浮亏 -3.5%,继续观察突破信号。",
+        "confidence": 35,
+        "risk": "RKLZ 持仓小幅浮损,需守止损线 $11.00 以下;TSLL 长期套牢,不涉及本次决策。",
+        "parse_ok": true,
+        "raw": "```json\n{\n  \"action\": \"HOLD\",\n  \"ticker\": null,\n  \"qty\": 0,\n  \"price\": null,\n  \"reason\": \"RKLB 在 $89.10 区间震荡,无明显方向信号。现持 RKLZ 浮亏 -3.5%,继续观察突破信号。\",\n  \"confidence\": 35,\n  \"risk\": \"RKLZ 持仓小幅浮损,需守止损线 $11.00 以下;TSLL 长期套牢,不涉及本次决策。\"\n}\n```\n\n**核心分析:**\n- **RKLB 信号不清晰**: $89.10 处于今日高位,但缺乏突破动能或下行压力的明确证据\n- **持仓 R",
+        "cost_usd": 0.0038339999999999997,
+        "tokens": 2234
+      },
+      "deepseek": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "price": null,
+        "reason": "RKLB价格横盘，无明显涨跌信号，观望等待方向。",
+        "confidence": 75,
+        "risk": "RKLZ持仓小幅浮亏，但信号不明，不宜加仓或止损。",
+        "parse_ok": true,
+        "raw": "```json\n{\n  \"action\": \"HOLD\",\n  \"ticker\": null,\n  \"qty\": 0,\n  \"price\": null,\n  \"reason\": \"RKLB价格横盘，无明显涨跌信号，观望等待方向。\",\n  \"confidence\": 75,\n  \"risk\": \"RKLZ持仓小幅浮亏，但信号不明，不宜加仓或止损。\"\n}\n```",
+        "cost_usd": 0.0004361900000000001,
+        "tokens": 1345
+      },
+      "kimi": {
+        "action": "SELL",
+        "ticker": "RKLZ",
+        "qty": 100,
+        "price": 11.03,
+        "reason": "RKLB横盘微涨,RKLZ空头浮亏3.5%触发止损,及时截断亏损",
+        "confidence": 75,
+        "risk": "RKLB突破89.1或继续止损",
+        "parse_ok": true,
+        "raw": "```json\n{\n  \"action\": \"SELL\",\n  \"ticker\": \"RKLZ\",\n  \"qty\": 100,\n  \"price\": 11.03,\n  \"reason\": \"RKLB横盘微涨,RKLZ空头浮亏3.5%触发止损,及时截断亏损\",\n  \"confidence\": 75,\n  \"risk\": \"RKLB突破89.1或继续止损\"\n}\n```",
+        "cost_usd": 0.0005448,
+        "tokens": 1289
+      }
+    },
+    "leader": {
+      "final_action": "HOLD",
+      "final_ticker": null,
+      "final_qty": 0,
+      "final_price": null,
+      "final_reason": "RKLB在$89.10极窄幅横盘(今高=今低=89.10),无任何方向性信号,此时无论加多(RKLX)还是止损空头(RKLZ)都是噪音交易。RKLZ浮亏仅-3.5%未到硬止损线,Kimi止损略显激进。",
+      "agreement": "多数同意",
+      "risk_warning": "TSLL套牢占41%,做T资金已收缩,RKLZ继续持有需设-8%硬止损",
+      "differs_from_advisors": false,
+      "confidence": 75,
+      "parse_ok": true,
+      "raw": "{\"final_action\":\"HOLD\",\"final_ticker\":null,\"final_qty\":0,\"final_price\":null,\"final_reason\":\"RKLB在$89.10极窄幅横盘(今高=今低=89.10),无任何方向性信号,此时无论加多(RKLX)还是止损空头(RKLZ)都是噪音交易。RKLZ浮亏仅-3.5%未到硬止损线,Kimi止损略显激进。\",\"agreement\":\"多数同意\",\"risk_warning\":\"TSLL套牢占41%,做T资金已收缩,RKLZ继续持有需设-8%硬止损\",\"differs_from_advisors\":false,\"confidence\":75}",
+      "cost_usd": 0.01498,
+      "tokens": 2092
+    },
+    "total_cost_usd": 0.02409,
+    "total_tokens": 8289,
+    "duration_ms": 9705
+  },
+  {
+    "timestamp": "2026-04-22T15:57:39",
+    "trigger": {
+      "type": "manual_consult",
+      "reason": "主动询问 AI 意见",
+      "severity": "manual",
+      "ticker": "RKLB"
+    },
+    "market": {
+      "prices": {
+        "RKLB": {
+          "price": 89.21,
+          "low": 89.21,
+          "high": 89.26
+        },
+        "RKLX": {
+          "price": 47.47,
+          "low": 47.47,
+          "high": 47.51
+        },
+        "RKLZ": {
+          "price": 11.04,
+          "low": 11.04,
+          "high": 11.1
+        }
+      },
+      "indicators": {}
+    },
+    "portfolio": {
+      "cash": 20000.0,
+      "positions": {
+        "TSLL": {
+          "qty": 251,
+          "cost_basis": 22.275,
+          "current_price": 13.11
+        },
+        "RKLZ": {
+          "qty": 100,
+          "cost_basis": 11.43,
+          "current_price": 11.04
+        }
+      }
+    },
+    "advisors": {
+      "gpt_5": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "price": null,
+        "reason": "RKLB 近乎横盘无方向，RKLZ 仅小幅回撤不构成反转",
+        "confidence": 82,
+        "risk": "区间极窄，来回交易易被手续费吃掉",
+        "parse_ok": true,
+        "raw": "{\n  \"action\": \"HOLD\",\n  \"ticker\": null,\n  \"qty\": 0,\n  \"price\": null,\n  \"reason\": \"RKLB 近乎横盘无方向，RKLZ 仅小幅回撤不构成反转\",\n  \"confidence\": 82,\n  \"risk\": \"区间极窄，来回交易易被手续费吃掉\"\n}",
+        "cost_usd": 0.0044624999999999995,
+        "tokens": 1340
+      },
+      "kimi": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "price": null,
+        "reason": "RKLB开盘横走无方向，RKLZ浮亏3%未达止损，观望等信号",
+        "confidence": 35,
+        "risk": "RKLZ持仓若RKLB突破新高需止损",
+        "parse_ok": true,
+        "raw": "```json\n{\n  \"action\": \"HOLD\",\n  \"ticker\": null,\n  \"qty\": 0,\n  \"price\": null,\n  \"reason\": \"RKLB开盘横走无方向，RKLZ浮亏3%未达止损，观望等信号\",\n  \"confidence\": 35,\n  \"risk\": \"RKLZ持仓若RKLB突破新高需止损\"\n}\n```",
+        "cost_usd": 0.0005368,
+        "tokens": 1285
+      },
+      "deepseek": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "price": null,
+        "reason": "RKLB价格窄幅震荡，无明显方向性信号，观望为宜。",
+        "confidence": 85,
+        "risk": "窄幅盘整后可能选择方向，注意持仓RKLZ的浮亏。",
+        "parse_ok": true,
+        "raw": "```json\n{\n  \"action\": \"HOLD\",\n  \"ticker\": null,\n  \"qty\": 0,\n  \"price\": null,\n  \"reason\": \"RKLB价格窄幅震荡，无明显方向性信号，观望为宜。\",\n  \"confidence\": 85,\n  \"risk\": \"窄幅盘整后可能选择方向，注意持仓RKLZ的浮亏。\"\n}\n```",
+        "cost_usd": 0.0004361900000000001,
+        "tokens": 1345
+      },
+      "claude_haiku": {
+        "action": "HOLD",
+        "ticker": null,
+        "qty": 0,
+        "price": null,
+        "reason": "RKLB 在 $89.21 窄幅震荡(日幅 $0.05),信号不清晰,RKLZ 持仓浮亏 -3.41% 尚在容忍范围,无明确止损/止盈触发点。",
+        "confidence": 45,
+        "risk": "RKLZ 空头若 RKLB 反弹至 $90+ 易扩大亏损;TSLL 长期套牢,不影响本交易决策。",
+        "parse_ok": true,
+        "raw": "```json\n{\n  \"action\": \"HOLD\",\n  \"ticker\": null,\n  \"qty\": 0,\n  \"price\": null,\n  \"reason\": \"RKLB 在 $89.21 窄幅震荡(日幅 $0.05),信号不清晰,RKLZ 持仓浮亏 -3.41% 尚在容忍范围,无明确止损/止盈触发点。\",\n  \"confidence\": 45,\n  \"risk\": \"RKLZ 空头若 RKLB 反弹至 $90+ 易扩大亏损;TSLL 长期套牢,不影响本交易决策。\"\n}\n```\n\n**关键分析:**\n\n1. **信号模糊**  \n   - RKLB 今幅仅 $0.05 (0.",
+        "cost_usd": 0.0038339999999999997,
+        "tokens": 2234
+      }
+    },
+    "leader": {
+      "final_action": "HOLD",
+      "final_ticker": null,
+      "final_qty": 0,
+      "final_price": null,
+      "final_reason": "四位顾问一致观望,RKLB 日内仅 $0.05 窄幅震荡无方向性信号。RKLZ 浮亏 -3.41% 未达止损,现金充足但无加仓理由,等待 RKLB 突破 $89.26 或跌破 $89.21 再行动。",
+      "agreement": "共识",
+      "risk_warning": "TSLL 套牢占用资金,做 T 弹药有限,勿盲动",
+      "differs_from_advisors": false,
+      "confidence": 80,
+      "parse_ok": true,
+      "raw": "{\"final_action\":\"HOLD\",\"final_ticker\":null,\"final_qty\":0,\"final_price\":null,\"final_reason\":\"四位顾问一致观望,RKLB 日内仅 $0.05 窄幅震荡无方向性信号。RKLZ 浮亏 -3.41% 未达止损,现金充足但无加仓理由,等待 RKLB 突破 $89.26 或跌破 $89.21 再行动。\",\"agreement\":\"共识\",\"risk_warning\":\"TSLL 套牢占用资金,做 T 弹药有限,勿盲动\",\"differs_from_advisors\":false,\"confidence\":80}",
+      "cost_usd": 0.014770000000000002,
+      "tokens": 2106
+    },
+    "total_cost_usd": 0.02404,
+    "total_tokens": 8310,
+    "duration_ms": 9726
+  }
+]
