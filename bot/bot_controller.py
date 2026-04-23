@@ -2,6 +2,17 @@
 MagicQuant 慧投 — Telegram Bot Controller v0.3.0
 Dare to dream. Data to win.
 
+变更 v0.5.13(2026-04-23):
+  - 🔧 [FIX #3] /detail 在 PEAK 时段失灵修复
+        refresh_quote_into_signal 新增 Focus session cache 优先读
+        只有 Focus 没跑或数据过老才回落 Futu fetch_one
+        PEAK 时段 /detail 不再打 Futu 配额
+  - 🔧 [FIX #4] AI 凭空编造仓位金额修复
+        cmd_detail AI context 采用三级 fallback:
+          Focus session -> realtime_quote -> JSON 快照
+        build_analysis_prompt system prompt 加硬约束:
+          单笔最大仓位 40% / PDT 提醒 / qty*price 不得超现金
+
 变更 v0.5.11(2026-04-22):
   - 🆕 /profile 指令:查看当前机会密度画像 + 未来 12 小时时间线
   - 🆕 /status 升级:显示 profile / event / 今日提醒计划
@@ -54,8 +65,8 @@ from version import get_logo, get_changelog_text, get_version_string, APP_NAME_C
 from i18n import t, set_lang
 set_lang(LANGUAGE)
 
-BOT_CONTROLLER_VERSION = "v0.5.11"
-BOT_CONTROLLER_DATE    = "2026-04-22"
+BOT_CONTROLLER_VERSION = "v0.5.13"
+BOT_CONTROLLER_DATE    = "2026-04-23"
 
 # 对账单解析模块 / Statement parser module
 try:
@@ -283,6 +294,11 @@ def build_analysis_prompt(ticker: str, signal_data: dict) -> tuple[str, str]:
     t1             = risk.get("target1", "?")
     t2             = risk.get("target2", "?")
 
+    # v0.5.13: PDT 状态 + 单笔硬约束
+    pdt_restricted = available_cash < 25000
+    max_single_usd = available_cash * 0.40   # 单笔最多 40% 仓位
+    max_single_qty = int(max_single_usd / price) if price > 0 else 0
+
     # 当前持仓描述
     if pos and pos.get("qty", 0) > 0:
         qty        = pos["qty"]
@@ -304,7 +320,14 @@ def build_analysis_prompt(ticker: str, signal_data: dict) -> tuple[str, str]:
         "你是一位有10年经验的美股量化交易员，擅长技术分析和日内/波段交易。"
         "分析时直接、简洁、有逻辑，不废话，不加免责声明。"
         "操作建议必须给出明确的股数和总金额，不能只说价格范围。"
-        "用中文回答，严格按用户要求的格式输出。"
+        "用中文回答，严格按用户要求的格式输出。\n\n"
+        "⚠️ 硬性约束(不可违反):\n"
+        f"1. 用户可用现金: ${available_cash:,.2f}\n"
+        f"2. 单笔最大仓位: ${max_single_usd:,.0f} (账户 40%)\n"
+        f"3. 该价位下,单笔最多可买 {max_single_qty} 股\n"
+        f"4. PDT 状态: {'受限(USD<$25k,5日内最多3次日内交易)' if pdt_restricted else '不受限'}\n"
+        "5. 你建议的【买入股数 × 价格】必须 ≤ 单笔最大仓位,严禁超额\n"
+        "6. 若方向与现有持仓冲突,必须明确说'先平现有仓,再建新仓'\n"
     )
 
     user = (
@@ -321,7 +344,9 @@ def build_analysis_prompt(ticker: str, signal_data: dict) -> tuple[str, str]:
         f"K线形态: {patterns}\n"
         f"近7日收盘: {ph}\n\n"
         f"═══ 账户状态 ═══\n"
-        f"账户规模: ${account_size:,.2f}  {pos_desc}\n"
+        f"账户规模: ${account_size:,.2f}  可用现金: ${available_cash:,.2f}\n"
+        f"单笔硬上限: {max_single_qty} 股 (${max_single_usd:,.0f},账户 40%)\n"
+        f"{pos_desc}\n"
         f"{action_hint}\n\n"
         f"信号依据:\n{reasons}\n\n"
         f"═══ 输出格式（每段2-4句，总计250-350字）═══\n"
@@ -708,17 +733,71 @@ def load_signals():
 #  实时价刷新辅助 / Realtime Quote Refresh Helpers (v0.2.1)
 # ══════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════
+#  v0.5.13 Focus session cache 优先读(缓解 PEAK 时段 Futu 配额打爆)
+# ══════════════════════════════════════════════════════════════════
+def _get_from_focus_cache(ticker: str) -> dict | None:
+    """
+    v0.5.13: 优先从 Focus session 读取 ticker 的 quote + 持仓 + 账户,
+    避免 PEAK 时段 /detail 走 fetch_one 超 Futu 配额。
+    
+    返回: quote dict (兼容 fetch_one 格式) 或 None(Focus 没跑或 cache 过老)
+    """
+    try:
+        from core.focus.focus_manager import get_current_session
+        session = get_current_session()
+        if session is None or not session.active:
+            return None
+        
+        # 价格
+        price = session.get_last_price(ticker)
+        quote = session.get_quote(ticker) or {}
+        if not price:
+            return None
+        
+        # 年龄检查:session 数据必须是 30 秒内的(Focus 主循环频率最慢 30 秒)
+        import time
+        first_ts = getattr(session, "first_data_ts", None)
+        if first_ts is None or (time.time() - first_ts) < 5:
+            # 数据刚开始抓,还不可靠
+            return None
+        
+        # 组装返回值(字段兼容 merge_realtime_into_signal 预期)
+        return {
+            "ticker":       ticker,
+            "price":        price,
+            "change":       quote.get("change"),
+            "change_pct":   quote.get("change_pct"),
+            "prev_close":   quote.get("prev_close"),
+            "update_time":  quote.get("update_time"),
+            "volume":       quote.get("volume"),
+            "high":         quote.get("high"),
+            "low":          quote.get("low"),
+            "open":         quote.get("open"),
+            "_source":      "focus_cache",   # 诊断标记
+        }
+    except Exception as e:
+        print(f"  [_get_from_focus_cache] {e}")
+        return None
+
+
 def refresh_quote_into_signal(s: dict) -> dict:
     """
-    查询前刷新：用 Futu 实时 quote 覆盖 signal 中的价格字段。
-    失败自动降级为 JSON 原值（price_is_live=False）。
+    查询前刷新:用 Focus session cache 或 Futu 实时 quote 覆盖 signal 中的价格。
+    v0.5.13: 优先读 Focus session,PEAK 时段不撞 Futu 配额
+    失败自动降级为 JSON 原值(price_is_live=False)
     """
     if not HAS_REALTIME or not s:
         if s is not None:
             s["price_is_live"] = False
         return s
     try:
-        quote = get_quote_client().fetch_one(s.get("ticker", ""))
+        ticker = s.get("ticker", "")
+        # v0.5.13: 先查 Focus cache
+        quote = _get_from_focus_cache(ticker)
+        if quote is None:
+            # Cache 不可用 → 回落到 Futu fetch_one
+            quote = get_quote_client().fetch_one(ticker)
         return merge_realtime_into_signal(s, quote)
     except Exception as e:
         print(f"  [realtime] refresh failed: {e}")
@@ -1257,17 +1336,48 @@ def cmd_detail(ticker_raw, force_refresh=False):
         from config.settings import ACCOUNT_SIZE
         s_with_account = dict(s)
         s_with_account["_account_size"]   = ACCOUNT_SIZE
-        s_with_account["_available_cash"] = ACCOUNT_SIZE
+        s_with_account["_available_cash"] = ACCOUNT_SIZE   # 先用配置默认值
 
-        # 尝试读取真实可用现金
+        # v0.5.13: 三级 fallback 读真实可用现金
+        # 1. Focus session (最新,每 60 秒刷)
+        # 2. realtime_quote.fetch_account (实时查询 Moomoo)
+        # 3. JSON 快照 (最老)
+        cash_source = "config_default"
+        cash_resolved = None
+
         try:
-            acc_data = load_account_data()
-            if acc_data and acc_data.get("account"):
-                cash = safe_float(acc_data["account"].get("cash", ACCOUNT_SIZE))
-                if cash > 0:
-                    s_with_account["_available_cash"] = cash
-        except:
-            pass
+            from core.focus.focus_manager import get_current_session
+            session = get_current_session()
+            if session and session.active and session.cash_available is not None:
+                cash_resolved = float(session.cash_available)
+                cash_source = "focus_session"
+        except Exception as e:
+            print(f"  [detail] Focus session cash failed: {e}")
+
+        if cash_resolved is None:
+            try:
+                live_acc = refresh_account_live()
+                if live_acc and live_acc.get("cash") is not None:
+                    cash_resolved = float(live_acc["cash"])
+                    cash_source = "realtime_fetch"
+            except Exception as e:
+                print(f"  [detail] realtime fetch cash failed: {e}")
+
+        if cash_resolved is None:
+            try:
+                acc_data = load_account_data()
+                if acc_data and acc_data.get("account"):
+                    cash = safe_float(acc_data["account"].get("cash", ACCOUNT_SIZE))
+                    if cash > 0:
+                        cash_resolved = cash
+                        cash_source = "json_snapshot"
+            except:
+                pass
+
+        if cash_resolved is not None and cash_resolved > 0:
+            s_with_account["_available_cash"] = cash_resolved
+
+        print(f"  [detail] AI context cash=${s_with_account['_available_cash']:,.2f} source={cash_source}")
 
         _, est_cost = estimate_cost(
             f"{ticker_short} {sig} RSI={ind.get('rsi')} MACD={ind.get('macd_hist')}")
