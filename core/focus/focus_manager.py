@@ -1,9 +1,15 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — focus_manager.py
-  VERSION : v0.5.10
-  DATE    : 2026-04-23
+  VERSION : v0.5.11
+  DATE    : 2026-04-25
   CHANGES :
+    v0.5.11 (2026-04-25):
+      - [FIX] _fetch_5m_kline: ret=-1 是 Moomoo AU 的已知行为
+              原来判断 ret==0 才用数据,导致 kline_cache 永远是 None
+              indicators_cache 永远是 {},has_indicators 永远 False
+              RSI/VWAP/量比 全部用默认值,信号质量极差
+              修复:只要 kl 有数据就使用,不依赖 ret 值
     v0.5.10 (2026-04-23):
       - [NEW] _archive_daily_klines() 盘后自动归档当日 1 分钟 K 线
               + session summary 到 data/review/YYYY-MM-DD/
@@ -71,8 +77,8 @@ from .proactive_reminder import check_and_fire_reminders
 from .event_calendar import format_event_line
 
 
-FOCUS_MGR_VERSION = "v0.5.10"
-FOCUS_MGR_DATE    = "2026-04-23"
+FOCUS_MGR_VERSION = "v0.5.11"
+FOCUS_MGR_DATE    = "2026-04-25"
 
 # ── 全局单例 ─────────────────────────────────────────────
 _current_session: Optional[FocusSession] = None
@@ -647,7 +653,8 @@ def _fetch_5m_kline(client, ticker: str, num: int = 30):
             ret, kl = client._quote_ctx.get_cur_kline(
                 ticker, num, KLType.K_5M, AuType.QFQ
             )
-        if ret == 0 and kl is not None and len(kl) > 0:
+        # v0.5.10: ret=-1 是 Moomoo AU 的已知行为,只要 kl 有数据就用
+        if kl is not None and len(kl) > 0:
             return kl
         return None
     except Exception as e:
