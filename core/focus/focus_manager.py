@@ -1,9 +1,14 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — focus_manager.py
-  VERSION : v0.5.9
-  DATE    : 2026-04-22
+  VERSION : v0.5.10
+  DATE    : 2026-04-23
   CHANGES :
+    v0.5.10 (2026-04-23):
+      - [NEW] _archive_daily_klines() 盘后自动归档当日 1 分钟 K 线
+              + session summary 到 data/review/YYYY-MM-DD/
+              触发时机:市场从 regular/post/overnight → closed
+              供第二天自动复盘使用
     v0.5.9 (2026-04-22):
       - [FIX] 新增模块级 _indicators_cache_global,修复 /ai_test 指令
               "❌ 无法读取 Focus session 状态" 错误
@@ -66,8 +71,8 @@ from .proactive_reminder import check_and_fire_reminders
 from .event_calendar import format_event_line
 
 
-FOCUS_MGR_VERSION = "v0.5.9"
-FOCUS_MGR_DATE    = "2026-04-22"
+FOCUS_MGR_VERSION = "v0.5.10"
+FOCUS_MGR_DATE    = "2026-04-23"
 
 # ── 全局单例 ─────────────────────────────────────────────
 _current_session: Optional[FocusSession] = None
@@ -376,6 +381,106 @@ def _build_heartbeat(session: FocusSession, indicators: dict) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════
+#  v0.5.10 复盘数据归档(每天收盘后触发一次)
+# ══════════════════════════════════════════════════════════════════
+_kline_archive_done_date = None   # 避免同一天重复归档
+
+def _archive_daily_klines(session, client):
+    """
+    v0.5.10: 盘后归档当日 1 分钟 K 线到 data/review/YYYY-MM-DD/
+    供第二天自动复盘使用。失败不影响主流程。
+
+    每天只归档一次(通过 _kline_archive_done_date 去重)。
+    """
+    global _kline_archive_done_date
+    try:
+        import os
+        import json
+        from datetime import datetime as _dt
+
+        today_str = _dt.now().strftime("%Y-%m-%d")
+        if _kline_archive_done_date == today_str:
+            return  # 今天已经归档过
+
+        # 路径:项目根/data/review/YYYY-MM-DD/
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        archive_dir = os.path.join(base_dir, "data", "review", today_str)
+        os.makedirs(archive_dir, exist_ok=True)
+
+        tickers = [session.master] + list(session.followers or [])
+        success_count = 0
+
+        for ticker in tickers:
+            try:
+                if not client._ensure_quote():
+                    continue
+                with client._quote_lock:
+                    ret, kl = client._quote_ctx.get_cur_kline(
+                        ticker, 500, KLType.K_1M, AuType.QFQ
+                    )
+                if ret != 0 or kl is None or len(kl) == 0:
+                    continue
+
+                # DataFrame → dict list 存 JSON
+                records = []
+                for _, row in kl.iterrows():
+                    records.append({
+                        "time_key": str(row.get("time_key", "")),
+                        "open":    float(row.get("open", 0)),
+                        "close":   float(row.get("close", 0)),
+                        "high":    float(row.get("high", 0)),
+                        "low":     float(row.get("low", 0)),
+                        "volume":  int(row.get("volume", 0)),
+                        "turnover": float(row.get("turnover", 0)),
+                    })
+
+                short_name = ticker.replace("US.", "")
+                out_path = os.path.join(archive_dir, f"kline_1m_{short_name}.json")
+                with open(out_path, "w", encoding="utf-8") as f:
+                    json.dump(records, f, ensure_ascii=False, indent=2)
+                success_count += 1
+                print(f"  [archive] saved {ticker} 1m klines ({len(records)} bars) → {out_path}")
+            except Exception as e:
+                print(f"  [archive] {ticker} failed: {e}")
+
+        # 顺便存一份 session 快照(session 总结)
+        try:
+            summary = {
+                "date": today_str,
+                "master": session.master,
+                "followers": list(session.followers or []),
+                "loop_count": session.loop_count,
+                "trigger_count": session.trigger_count,
+                "push_count": session.push_count,
+                "error_count": session.error_count,
+                "cash_available_final": session.cash_available,
+                "session_high": {k.replace("US.", ""): v for k, v in (session.session_high or {}).items()},
+                "session_low":  {k.replace("US.", ""): v for k, v in (session.session_low  or {}).items()},
+                "positions_final": {
+                    k.replace("US.", ""): {
+                        "qty": v.get("qty"),
+                        "cost": v.get("cost_price"),
+                        "pl_val": v.get("pl_val"),
+                        "pl_pct": v.get("pl_pct"),
+                    }
+                    for k, v in (session.positions_snapshot or {}).items()
+                    if v and v.get("qty", 0) > 0
+                },
+                "archive_time": _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            with open(os.path.join(archive_dir, "session_summary.json"), "w", encoding="utf-8") as f:
+                json.dump(summary, f, ensure_ascii=False, indent=2, default=str)
+        except Exception as e:
+            print(f"  [archive] session summary failed: {e}")
+
+        _kline_archive_done_date = today_str
+        print(f"  [archive] ✅ {success_count}/{len(tickers)} klines archived to {archive_dir}")
+
+    except Exception as e:
+        print(f"  [_archive_daily_klines] failed: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════
 #  主循环
 # ══════════════════════════════════════════════════════════════════
 def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threading.Event):
@@ -410,6 +515,10 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
         if market_status != last_market_status:
             if last_market_status is not None:
                 _notify_market_change(send_tg_fn, last_market_status, market_status)
+                # v0.5.10: 从 post/regular/overnight 切到 closed 时归档当日 K 线
+                if (market_status == "closed" and
+                    last_market_status in ("regular", "post", "overnight")):
+                    _archive_daily_klines(session, client)
             last_market_status = market_status
             session.market_status = market_status
 
