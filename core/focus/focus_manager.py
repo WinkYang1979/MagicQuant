@@ -1,9 +1,15 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — focus_manager.py
-  VERSION : v0.5.11
+  VERSION : v0.5.12
   DATE    : 2026-04-25
   CHANGES :
+    v0.5.12 (2026-04-25):
+      - [FIX] _fetch_5m_kline: 반환값이 DataFrame 이 아닌 경우(list/dict) 방어 처리
+              TypeError: string indices must be integers 오류 수정
+              DataFrame 으로 변환 시도 + 필수 컬럼 확인
+      - [FIX] positions refresh: list 반환 시 dict 로 변환
+              'list' object has no attribute 'items' 오류 수정
     v0.5.11 (2026-04-25):
       - [FIX] _fetch_5m_kline: ret=-1 是 Moomoo AU 的已知行为
               原来判断 ret==0 才用数据,导致 kline_cache 永远是 None
@@ -77,7 +83,7 @@ from .proactive_reminder import check_and_fire_reminders
 from .event_calendar import format_event_line
 
 
-FOCUS_MGR_VERSION = "v0.5.11"
+FOCUS_MGR_VERSION = "v0.5.12"
 FOCUS_MGR_DATE    = "2026-04-25"
 
 # ── 全局单例 ─────────────────────────────────────────────
@@ -559,6 +565,10 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
             if now - last_position_fetch >= POSITION_FETCH_INTERVAL:
                 positions = client.fetch_positions()
                 if positions is not None:
+                    # v0.5.12: fetch_positions 가 list 를 반환하는 경우 방어 처리
+                    if isinstance(positions, list):
+                        print(f"  [focus] positions was list, converting to dict")
+                        positions = {p["ticker"]: p for p in positions if "ticker" in p}
                     session.update_positions(positions)
                 last_position_fetch = now
 
@@ -654,9 +664,24 @@ def _fetch_5m_kline(client, ticker: str, num: int = 30):
                 ticker, num, KLType.K_5M, AuType.QFQ
             )
         # v0.5.10: ret=-1 是 Moomoo AU 的已知行为,只要 kl 有数据就用
-        if kl is not None and len(kl) > 0:
-            return kl
-        return None
+        # v0.5.12: 加 DataFrame 类型检查,list/dict 也尝试转换
+        import pandas as pd
+        if kl is None:
+            return None
+        if not isinstance(kl, pd.DataFrame):
+            try:
+                kl = pd.DataFrame(kl)
+            except Exception as e2:
+                print(f"  [focus] kline type convert failed: {e2}")
+                return None
+        if len(kl) == 0:
+            return None
+        # 必要列检查
+        required = {"close", "high", "low", "open", "volume"}
+        if not required.issubset(set(kl.columns)):
+            print(f"  [focus] kline missing columns: {set(kl.columns)}")
+            return None
+        return kl
     except Exception as e:
         print(f"  [focus] kline fetch error: {e}")
         return None
