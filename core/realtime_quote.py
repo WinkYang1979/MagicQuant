@@ -427,8 +427,10 @@ class QuoteClient:
             hkd_market        = _f("market_val")
 
             # 策略 1: 如果内置美元字段齐全,直接用
+            # us_cash = USD 现金总额(Moomoo UI 显示值)
+            # us_avl_withdrawal_cash = 可立即提现额(受 T+2/PDT 限制,通常偏小)
             if usd_cash > 0 or usd_avl_withdraw > 0:
-                cash = usd_avl_withdraw or usd_cash
+                cash = usd_cash or usd_avl_withdraw
                 power = usd_buy_power or cash
 
                 # v0.5.4: total_assets 和 market_val 统一用美股账户真实美元值

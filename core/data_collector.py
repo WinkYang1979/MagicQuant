@@ -41,11 +41,17 @@ def safe(fn, label=""):
 
 
 def collect_account(trd_ctx):
-    """账户资产信息"""
-    ret, data = trd_ctx.accinfo_query(trd_env=TrdEnv.REAL)
+    """账户资产信息
+    Moomoo AU 默认 accinfo_query 返回 HKD 聚合值。
+    us_cash / usd_assets 是内置的 USD 独立字段，覆盖写入 cash/total_assets/market_val
+    供 bot_controller JSON fallback 正确读取 USD 值。
+    """
+    ret, data = trd_ctx.accinfo_query(trd_env=TrdEnv.REAL, refresh_cache=True)
     if ret != RET_OK or len(data) == 0:
         return {}
     row = data.iloc[0]
+
+    # 存全部原始字段
     result = {}
     for col in data.columns:
         try:
@@ -53,9 +59,40 @@ def collect_account(trd_ctx):
             result[col] = float(val) if hasattr(val, '__float__') else str(val)
         except:
             result[col] = str(row[col])
-    print(f"  账户总资产: ${result.get('total_assets', 0):,.2f}")
-    print(f"  可用资金:   ${result.get('cash', 0):,.2f}")
-    print(f"  持仓市值:   ${result.get('market_val', 0):,.2f}")
+
+    def _fv(*keys, default=0.0):
+        for k in keys:
+            v = result.get(k)
+            if v is not None:
+                try:
+                    fv = float(v)
+                    if fv == fv and fv != 0.0:   # 非 NaN、非 0
+                        return fv
+                except (TypeError, ValueError):
+                    pass
+        return default
+
+    # us_cash = Moomoo UI 显示的 USD 现金总额
+    # usd_assets = 美股账户 USD 总资产
+    usd_cash   = _fv("us_cash", "usd_cash")
+    usd_assets = _fv("usd_assets")
+    usd_avl    = _fv("us_avl_withdrawal_cash")
+
+    if usd_cash > 0 or usd_assets > 0:
+        # 用 HKD 原始字段做诊断保留，USD 字段覆盖主键
+        result["raw_hkd_cash"]        = result.get("cash", 0)
+        result["raw_hkd_total_assets"]= result.get("total_assets", 0)
+        result["raw_hkd_market_val"]  = result.get("market_val", 0)
+
+        result["cash"]         = usd_cash
+        result["total_assets"] = usd_assets
+        result["market_val"]   = round(max(0.0, usd_assets - usd_cash), 2)
+        result["avl_withdrawal_cash"] = usd_avl
+        result["currency"]     = "USD"
+
+    print(f"  账户总资产 (USD): ${result.get('total_assets', 0):,.2f}")
+    print(f"  可用现金   (USD): ${result.get('cash', 0):,.2f}")
+    print(f"  持仓市值   (USD): ${result.get('market_val', 0):,.2f}")
     return result
 
 
