@@ -1169,8 +1169,20 @@ def cmd_detail(ticker_raw, force_refresh=False):
     s = sig_map.get(ticker)
     if not s:
         return t("no_data_ticker", ticker=ticker_raw)
+
+    # v0.5.14: error 信号优先走 Focus cache 补价格，再决定是否报错
+    # Snapshot failed 是 Futu 配额/断线问题，Focus session 可能仍有实时价
     if "error" in s:
-        return t("data_error", ticker=ticker_raw, err=s["error"])
+        focus_quote = _get_from_focus_cache(ticker)
+        if focus_quote:
+            s["price"]      = focus_quote["price"]
+            s["change"]     = focus_quote.get("change")
+            s["change_pct"] = focus_quote.get("change_pct")
+            s["price_is_live"] = True
+            print(f"  [detail] error={s['error']} → patched from focus_cache, continuing")
+            s.pop("error")
+        else:
+            return t("data_error", ticker=ticker_raw, err=s["error"])
 
     # 🆕 刷新实时价(v0.2.1)
     s = refresh_quote_into_signal(s)
@@ -1909,76 +1921,139 @@ def cmd_account():
 
 
 def cmd_positions():
-    # v0.2.2: 优先走实时接口
-    if HAS_REALTIME:
-        try:
-            live_positions = get_quote_client().fetch_positions()
-            if live_positions is not None:
-                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                if not live_positions:
-                    return f"💼 持仓 · 🟢 实时\n🕐 {now}\n\n当前空仓"
+    if not HAS_REALTIME:
+        return "❌ 实时接口不可用，请检查 Futu 连接"
+    try:
+        live_positions = get_quote_client().fetch_positions()
+    except Exception as e:
+        print(f"  [realtime] cmd_positions failed: {e}")
+        return f"❌ 获取实时持仓失败: {e}"
 
-                lines = [f"💼 持仓 · 🟢 实时", f"🕐 {now}", ""]
-                total_pl = 0.0
-                for code, pos in live_positions.items():
-                    short_code = code.replace("US.", "")
-                    qty       = pos.get("qty", 0)
-                    cost      = pos.get("cost_price", 0)
-                    cur_price = pos.get("current_price", 0)
-                    pl_val    = pos.get("pl_val", 0)
-                    pl_pct    = pos.get("pl_pct", 0)
-                    mkt_val   = round(qty * cur_price, 2) if cur_price else round(qty * cost, 2)
-                    total_pl += pl_val
-                    pl_sign = "+" if pl_val >= 0 else ""
-                    emoji   = "📈" if pl_val >= 0 else "📉"
-                    lines += [
-                        f"{emoji} {short_code}",
-                        f"  数量: {qty:.0f} 股  成本: ${cost:.2f}  现价: ${cur_price:.2f}",
-                        f"  市值: ${mkt_val:,.2f}",
-                        f"  盈亏: {pl_sign}${pl_val:.2f} ({pl_sign}{pl_pct:.2f}%)",
-                        "",
-                    ]
-                total_sign = "+" if total_pl >= 0 else ""
-                lines.append(f"━━━━━━━━━━━━")
-                lines.append(f"总盈亏: {total_sign}${abs(total_pl):,.2f}")
-                return "\n".join(lines)
-        except Exception as e:
-            print(f"  [realtime] cmd_positions failed: {e}")
-            # 继续下面的 JSON 降级
+    if live_positions is None:
+        return "❌ 获取实时持仓失败，请检查 Futu 连接"
 
-    # 降级:读 JSON
-    data = load_account_data()
-    if not data:
-        return t("no_account_data")
-    positions = data.get("positions", [])
-    if not positions:
-        return t("no_positions")
+    try:
+        from core.focus.focus_manager import get_current_session
+        _fs = get_current_session()
+        if _fs and _fs.active:
+            _fs.update_positions(live_positions)
+    except Exception:
+        pass
 
-    collected_at = data.get("collected_at", "")[:16].replace("T", " ")
-    lines = [t("positions_title", t=collected_at), ""]
-    total_pl = 0
-    for pos in positions:
-        code      = str(pos.get("code", "")).replace("US.", "")
-        qty       = safe_float(pos.get("qty", 0))
-        cost      = safe_float(pos.get("cost_price", 0))
-        mkt_val   = safe_float(pos.get("market_val", pos.get("market_value", 0)))
-        pl_val    = safe_float(pos.get("pl_val", pos.get("pl", 0)))
-        pl_ratio  = safe_float(pos.get("pl_ratio", 0))
-        pl_pct    = pl_ratio * 100 if abs(pl_ratio) < 10 else safe_float(pos.get("pl_pct", 0))
-        cur_price = safe_float(pos.get("current_price", pos.get("price", cost)))
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if not live_positions:
+        return f"💼 持仓 · 🟢 实时\n🕐 {now}\n\n当前空仓"
+
+    lines = [f"💼 持仓 · 🟢 实时", f"🕐 {now}", ""]
+    total_pl = 0.0
+    for code, pos in live_positions.items():
+        short_code = code.replace("US.", "")
+        qty       = pos.get("qty", 0)
+        cost      = pos.get("cost_price", 0)
+        cur_price = pos.get("current_price", 0)
+        pl_val    = pos.get("pl_val", 0)
+        pl_pct    = pos.get("pl_pct", 0)
+        mkt_val   = round(qty * cur_price, 2) if cur_price else round(qty * cost, 2)
         total_pl += pl_val
-        pl_sign   = "+" if pl_val >= 0 else ""
-        emoji     = "📈" if pl_val >= 0 else "📉"
+        pl_sign = "+" if pl_val >= 0 else ""
+        emoji   = "📈" if pl_val >= 0 else "📉"
         lines += [
-            f"{emoji} {code}",
-            t("pos_row1", qty=qty, cost=cost, price=cur_price),
-            t("pos_row2", mkt=mkt_val),
-            t("pos_row3", sign=pl_sign, pl=pl_val, pct=pl_pct),
+            f"{emoji} {short_code}",
+            f"  数量: {qty:.0f} 股  成本: ${cost:.2f}  现价: ${cur_price:.2f}",
+            f"  市值: ${mkt_val:,.2f}",
+            f"  盈亏: {pl_sign}${pl_val:.2f} ({pl_sign}{pl_pct:.2f}%)",
             "",
         ]
     total_sign = "+" if total_pl >= 0 else ""
-    lines.append(t("pos_total_pl", sign=total_sign, pl=abs(total_pl)))
-    lines.append(f"\n⚪ 快照数据,Futu 连接暂不可用")
+    lines.append(f"━━━━━━━━━━━━")
+    lines.append(f"总盈亏: {total_sign}${abs(total_pl):,.2f}")
+    return "\n".join(lines)
+
+
+def cmd_refresh():
+    """立即刷新持仓 + 现金并推送确认消息"""
+    if not HAS_REALTIME:
+        return "❌ 实时接口不可用，请检查 Futu 连接"
+
+    client = get_quote_client()
+    errors = []
+
+    # 1. 刷新持仓
+    try:
+        positions = client.fetch_positions()
+    except Exception as e:
+        positions = None
+        errors.append(f"持仓: {e}")
+
+    # 2. 刷新账户现金
+    try:
+        acc = client.fetch_account()
+    except Exception as e:
+        acc = None
+        errors.append(f"账户: {e}")
+
+    # 3. 写入 Focus session
+    try:
+        from core.focus.focus_manager import get_current_session, _fetch_and_update_cash
+        _fs = get_current_session()
+        if _fs and _fs.active:
+            if positions is not None:
+                if isinstance(positions, list):
+                    positions = {p["ticker"]: p for p in positions if "ticker" in p}
+                _fs.update_positions(positions)
+            if acc is not None:
+                cash  = acc.get("cash")
+                power = acc.get("power") or acc.get("usd_buying_power")
+                if cash is not None:
+                    _fs.update_cash(float(cash), float(power) if power else None)
+    except Exception as e:
+        errors.append(f"session 更新: {e}")
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines = [f"🔄 <b>持仓 & 现金已刷新</b>", f"🕐 {now}", ""]
+
+    # 持仓摘要
+    if positions:
+        total_pl = 0.0
+        for code, pos in positions.items():
+            short_code = code.replace("US.", "")
+            qty       = pos.get("qty", 0)
+            cost      = pos.get("cost_price", 0)
+            cur_price = pos.get("current_price", 0)
+            pl_val    = pos.get("pl_val", 0)
+            pl_pct    = pos.get("pl_pct", 0)
+            mkt_val   = round(qty * cur_price, 2) if cur_price else round(qty * cost, 2)
+            total_pl += pl_val
+            pl_sign   = "+" if pl_val >= 0 else ""
+            emoji     = "📈" if pl_val >= 0 else "📉"
+            lines += [
+                f"{emoji} {short_code}",
+                f"  {qty:.0f}股  成本 ${cost:.2f}  现价 ${cur_price:.2f}",
+                f"  市值 ${mkt_val:,.2f}  盈亏 {pl_sign}${pl_val:.2f} ({pl_sign}{pl_pct:.2f}%)",
+                "",
+            ]
+        total_sign = "+" if total_pl >= 0 else ""
+        lines.append(f"总盈亏: {total_sign}${abs(total_pl):,.2f}")
+    elif positions is not None:
+        lines.append("当前空仓")
+    else:
+        lines.append("⚠️ 持仓获取失败")
+
+    lines.append("")
+
+    # 现金摘要
+    if acc:
+        cash  = acc.get("cash", 0)
+        total = acc.get("total_assets", 0)
+        lines.append(f"💵 可用现金: ${cash:,.2f}")
+        if total:
+            lines.append(f"📊 总资产:   ${total:,.2f}")
+    else:
+        lines.append("⚠️ 现金获取失败")
+
+    if errors:
+        lines += ["", "⚠️ " + " / ".join(errors)]
+
     return "\n".join(lines)
 
 
@@ -2730,6 +2805,8 @@ def handle(text, wl):
                 reason=reason,
                 send_tg_fn=send_tg,
             )
+            if result is None:
+                return "❌ 智囊团返回空结果 (consult_advisors 返回 None)"
             if result.get("error"):
                 return f"❌ {result['error']}"
             return None   # manual_consult 内部已推送
@@ -2982,9 +3059,7 @@ def handle(text, wl):
     if cmd == "refresh_account": return cmd_refresh_account()
     if cmd == "version":         return get_changelog_text(latest_only=True)
     if cmd == "about":           return get_logo()
-    if cmd == "refresh":
-        refresh()
-        return t("refresh_done")
+    if cmd == "refresh":         return cmd_refresh()
     if cmd in ("help", "start"): return cmd_help(args)
     return t("unknown_cmd", cmd=cmd)
 

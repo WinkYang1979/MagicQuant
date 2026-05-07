@@ -1,9 +1,42 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — focus_manager.py
-  VERSION : v0.5.12
-  DATE    : 2026-04-25
+  VERSION : v0.5.16
+  DATE    : 2026-04-28
   CHANGES :
+    v0.5.16 (2026-04-28):
+      - [FIX] kline freeze: _fetch_5m_kline 返回 None 时不再覆盖 kline_cache
+              原问题: fetch 失败 → kline_cache=None → indicators_cache 不更新
+                      → RSI/vol_ratio 永远冻结在上一次成功的值
+              修复: 只有 fetch 成功才更新 kline_cache，失败时保留上次好的 cache
+      - [FIX] 方向互斥: direction_trend 触发后 15 min 内压制反向 swing 信号
+              原问题: direction_trend 看多 与 swing_top 看空 同批推送，矛盾
+              修复: _focus_loop 里对 hits 二次过滤
+                    direction_trend long  → 15min 内 swing_top(short) 不推
+                    direction_trend short → 15min 内 swing_bottom(long) 不推
+                    压制时打印 "[focus] swing_xxx suppressed: ... fired Xs ago"
+    v0.5.15 (2026-04-27):
+      - [FIX] _fetch_5m_kline: 在 get_cur_kline 前先调用 subscribe(K_5M)
+              未订阅时 Futu 返回空/错误数据，是 has_indicators 永远 False 的根因
+              使用模块级 _kl_subscribed set 去重，每个 ticker 只订阅一次
+              新增 first_indicators_sent 验证日志：成功后打印 RSI/vol_ratio/vwap
+              SubType 加入 moomoo/futu import
+    v0.5.14 (2026-04-27):
+      - [FIX] _fetch_5m_kline: "DataFrame constructor not properly called!" 根因修复
+              原问题: 对非 None/str/DataFrame 的类型（int/bytes/自定义对象等）
+                      统一走 pd.DataFrame(kl) 兜底，遇到标量或不可解析对象就崩
+              修复: 每种类型独立处理分支，不用 pd.DataFrame() 作通配兜底
+                    - str   → 打印 Futu 错误信息，return None
+                    - Series → to_frame().T 转 DataFrame
+                    - list/dict → pd.DataFrame()，失败则 return None
+                    - 其他所有类型 → 打印 type 名称，return None
+              新增: 非 DataFrame 时先打印 type / repr / 前3条 item
+                    (KLINE-DIAG 日志)，帮助定位 Futu 实际返回内容
+    v0.5.13 (2026-04-27):
+      - [FIX] _fetch_5m_kline: Futu 失败时返回 str(错误信息) 而非 DataFrame/list/dict
+              pd.DataFrame(str) 抛 "DataFrame constructor not properly called!"
+              修复: isinstance(kl, str) 时记录错误并直接 return None
+              非预期类型时打印 type 名称辅助诊断
     v0.5.12 (2026-04-25):
       - [FIX] _fetch_5m_kline: 반환값이 DataFrame 이 아닌 경우(list/dict) 방어 처리
               TypeError: string indices must be integers 오류 수정
@@ -57,9 +90,9 @@ from datetime import datetime
 from typing import Callable, Optional
 
 try:
-    from moomoo import KLType, AuType
+    from moomoo import KLType, AuType, SubType
 except ImportError:
-    from futu import KLType, AuType
+    from futu import KLType, AuType, SubType
 
 from core.realtime_quote import get_client as get_quote_client
 
@@ -83,8 +116,8 @@ from .proactive_reminder import check_and_fire_reminders
 from .event_calendar import format_event_line
 
 
-FOCUS_MGR_VERSION = "v0.5.12"
-FOCUS_MGR_DATE    = "2026-04-25"
+FOCUS_MGR_VERSION = "v0.5.16"
+FOCUS_MGR_DATE    = "2026-04-28"
 
 # ── 全局单例 ─────────────────────────────────────────────
 _current_session: Optional[FocusSession] = None
@@ -103,8 +136,8 @@ POLL_INTERVAL_EXTENDED  = 10
 POLL_INTERVAL_CLOSED    = 60
 
 KLINE_FETCH_INTERVAL    = 30
-POSITION_FETCH_INTERVAL = 60
-CASH_FETCH_INTERVAL     = 60
+POSITION_FETCH_INTERVAL = 15
+CASH_FETCH_INTERVAL     = 30
 HEARTBEAT_INTERVAL      = 600
 
 
@@ -396,6 +429,7 @@ def _build_heartbeat(session: FocusSession, indicators: dict) -> str:
 #  v0.5.10 复盘数据归档(每天收盘后触发一次)
 # ══════════════════════════════════════════════════════════════════
 _kline_archive_done_date = None   # 避免同一天重复归档
+_kl_subscribed: set = set()       # 已订阅的 (ticker, subtype) 组合，避免重复 subscribe
 
 def _archive_daily_klines(session, client):
     """
@@ -499,14 +533,15 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
     print(f"  [focus] loop started for {session.master} "
           f"(manual={getattr(session, 'manual_mode', False)})")
 
-    last_kline_fetch     = 0
-    last_position_fetch  = 0
-    last_cash_fetch      = 0
-    last_heartbeat       = time.time()
-    kline_cache          = None
-    indicators_cache     = {}
+    last_kline_fetch      = 0
+    last_position_fetch   = 0
+    last_cash_fetch       = 0
+    last_heartbeat        = time.time()
+    kline_cache           = None
+    indicators_cache      = {}
     first_indicators_sent = False
-    last_market_status   = None
+    last_market_status    = None
+    last_trend_fire: dict = {}        # {"long": float, "short": float} 方向互斥时间戳
 
     # ── v0.5.6 关键:读 manual_mode ──
     manual_mode = getattr(session, "manual_mode", False)
@@ -552,7 +587,11 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
             now = time.time()
 
             if now - last_kline_fetch >= KLINE_FETCH_INTERVAL:
-                kline_cache = _fetch_5m_kline(client, session.master)
+                fetched = _fetch_5m_kline(client, session.master)
+                if fetched is not None:
+                    kline_cache = fetched          # 只有成功才覆盖
+                else:
+                    print("  [focus] kline fetch returned None, retaining last cache")
                 last_kline_fetch = now
 
             current_master_price = session.get_last_price(session.master)
@@ -590,7 +629,39 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
                 params=scaled_params,
             )
 
+            # ── 方向互斥过滤：direction_trend 触发后 15 min 内压制反向 swing ──
+            DIRECTION_MUTEX_SEC = 15 * 60
+            filtered_hits = []
             for hit in hits:
+                trig = hit.get("trigger")
+                dirn = hit.get("direction")
+
+                if trig == "direction_trend":
+                    last_trend_fire[dirn] = now      # 记录触发时刻
+                    filtered_hits.append(hit)
+
+                elif trig == "swing_top" and dirn == "short":
+                    # direction_trend 看多 15 min 内 → 压制 swing_top 看空
+                    elapsed = now - last_trend_fire.get("long", 0)
+                    if elapsed < DIRECTION_MUTEX_SEC:
+                        print(f"  [focus] swing_top suppressed: "
+                              f"direction_trend long fired {int(elapsed)}s ago")
+                        continue
+                    filtered_hits.append(hit)
+
+                elif trig == "swing_bottom" and dirn == "long":
+                    # direction_trend 看空 15 min 内 → 压制 swing_bottom 看多
+                    elapsed = now - last_trend_fire.get("short", 0)
+                    if elapsed < DIRECTION_MUTEX_SEC:
+                        print(f"  [focus] swing_bottom suppressed: "
+                              f"direction_trend short fired {int(elapsed)}s ago")
+                        continue
+                    filtered_hits.append(hit)
+
+                else:
+                    filtered_hits.append(hit)
+
+            for hit in filtered_hits:
                 try:
                     msg = format_trigger_message(hit, session)
                     if send_tg_fn:
@@ -610,6 +681,9 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
                     and indicators_cache
                     and indicators_cache.get("data_ok")):
                 first_indicators_sent = True
+                print(f"  [focus] ✅ has_indicators=True — RSI={indicators_cache.get('rsi_5m','?')} "
+                      f"vol_ratio={indicators_cache.get('vol_ratio','?')} "
+                      f"vwap={indicators_cache.get('vwap','?')}")
                 try:
                     send_tg_fn(_build_heartbeat(session, indicators_cache))
                     last_heartbeat = now
@@ -659,29 +733,84 @@ def _fetch_5m_kline(client, ticker: str, num: int = 30):
     try:
         if not client._ensure_quote():
             return None
+
+        # v0.5.15: 先订阅 K_5M，未订阅时 get_cur_kline 返回空/错误是 has_indicators 永远 False 的根因
+        global _kl_subscribed
+        sub_key = (ticker, "K_5M")
+        if sub_key not in _kl_subscribed:
+            with client._quote_lock:
+                ret_sub, err_sub = client._quote_ctx.subscribe(
+                    [ticker], [SubType.K_5M], subscribe_push=False
+                )
+            if ret_sub == 0:
+                _kl_subscribed.add(sub_key)
+                print(f"  [focus] subscribed {ticker} K_5M ✅")
+            else:
+                print(f"  [focus] subscribe {ticker} K_5M failed (ret={ret_sub}): {err_sub}")
+                # 订阅失败仍继续尝试 get_cur_kline（可能已在别处订阅）
+
         with client._quote_lock:
             ret, kl = client._quote_ctx.get_cur_kline(
                 ticker, num, KLType.K_5M, AuType.QFQ
             )
-        # v0.5.10: ret=-1 是 Moomoo AU 的已知行为,只要 kl 有数据就用
-        # v0.5.12: 加 DataFrame 类型检查,list/dict 也尝试转换
+
         import pandas as pd
+
+        # ── 诊断：非 DataFrame 时打印实际类型和内容，帮助定位根因 ──
+        if not isinstance(kl, pd.DataFrame):
+            kl_type = type(kl).__name__
+            kl_repr = repr(kl)
+            print(f"  [KLINE-DIAG] ret={ret}  type={kl_type}")
+            print(f"  [KLINE-DIAG] repr={kl_repr[:300]}")
+            if hasattr(kl, "__len__"):
+                print(f"  [KLINE-DIAG] len={len(kl)}")
+            if hasattr(kl, "__iter__") and not isinstance(kl, (str, bytes)):
+                try:
+                    for i, item in enumerate(list(kl)[:3]):
+                        print(f"  [KLINE-DIAG] item[{i}] "
+                              f"type={type(item).__name__}  {repr(item)[:150]}")
+                except Exception:
+                    pass
+
+        # ── 类型分支：每种情况独立处理，不用 pd.DataFrame() 兜底 ──
         if kl is None:
             return None
-        if not isinstance(kl, pd.DataFrame):
+
+        if isinstance(kl, str):
+            # Futu 失败时返回错误字符串（已知场景）
+            print(f"  [focus] kline error str from Futu (ret={ret}): {kl[:120]}")
+            return None
+
+        if isinstance(kl, pd.DataFrame):
+            pass  # 正常路径，直接往下走
+
+        elif isinstance(kl, pd.Series):
+            # 极少数情况：单行数据以 Series 返回
+            kl = kl.to_frame().T.reset_index(drop=True)
+
+        elif isinstance(kl, (list, dict)):
             try:
                 kl = pd.DataFrame(kl)
             except Exception as e2:
-                print(f"  [focus] kline type convert failed: {e2}")
+                print(f"  [focus] kline {type(kl).__name__}→DataFrame failed: {e2}")
                 return None
+
+        else:
+            # int / float / bytes / 自定义 Futu 对象等——无法转换，放弃
+            print(f"  [focus] kline unhandled type={type(kl).__name__}, dropping")
+            return None
+
         if len(kl) == 0:
             return None
+
         # 必要列检查
         required = {"close", "high", "low", "open", "volume"}
         if not required.issubset(set(kl.columns)):
-            print(f"  [focus] kline missing columns: {set(kl.columns)}")
+            print(f"  [focus] kline missing columns: {kl.columns.tolist()}")
             return None
+
         return kl
+
     except Exception as e:
         print(f"  [focus] kline fetch error: {e}")
         return None
