@@ -581,11 +581,13 @@ class QuoteClient:
                 # v0.5.2: 按 Moomoo AU 实际字段名,同时兼容老版 alias
                 qty           = int(_f("qty", "position_qty", default=0))
                 can_sell_qty  = int(_f("can_sell_qty", "sellable_qty", default=qty))
-                cost_price    = _f("cost_price", "average_cost", "diluted_cost", "avg_cost")
+                # average_cost 含手续费，与 Moomoo UI 显示一致；cost_price 是纯买入价（不含费）
+                cost_price    = _f("average_cost", "cost_price", "diluted_cost", "avg_cost")
                 current_price = _f("nominal_price", "current_price", "last_price")
                 market_val    = _f("market_val", "position_val")
                 pl_val        = _f("pl_val", "profit_val")
-                pl_pct        = _f("pl_ratio", "pl_ratio_val", "pl_pct")
+                # pl_ratio_avg_cost 与 average_cost 口径一致，优先用它
+                pl_pct        = _f("pl_ratio_avg_cost", "pl_ratio", "pl_ratio_val", "pl_pct")
                 today_pl_val  = _f("today_pl_val", default=0.0)
                 unrealized_pl = _f("unrealized_pl", default=pl_val)
                 realized_pl   = _f("realized_pl", default=0.0)
