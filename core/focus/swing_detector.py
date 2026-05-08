@@ -1,9 +1,34 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — swing_detector.py
-  VERSION : v0.5.5
-  DATE    : 2026-04-24
+  VERSION : v0.5.19
+  DATE    : 2026-05-08
   CHANGES :
+    v0.5.19 (2026-05-08):
+      - [FIX] profit_target_hit 冷却 300s → 600s(同 ticker 至少 10 分钟才再推)
+              原因:同日触发 82 次,严重刷屏
+    v0.5.18 (2026-05-08):
+      - [NEW] direction_trend SHORT 信号额外条件: vol_ratio >= 0.8
+              无量回调(量比<0.8)不视为空头趋势信号,过滤假突破误判
+              对应新参数: trend_vol_ratio_short_guard=0.8
+    v0.5.17 (2026-05-07):
+      - [OPT] trend_rsi_oversold_guard: 40 → 38 (基于真实数据分析,RSI<38 时 SHORT 信号
+              准确率仅 12.5%,收紧为严格屏蔽而非旧值)
+      - [NEW] rapid_move_pct_follower=1.20: RKLX/RKLZ 等 follower 标的独立阈值
+              (杠杆标的 0.65% 移动 ≈ RKLB 0.3%,纯噪声;1.2% 才有意义)
+      - [NEW] rapid_move_rsi_short_guard=70: RSI>70 时屏蔽 rapid_move SHORT
+              (真实数据 RSI>70 SHORT 准确率 0/4)
+      - [NEW] rapid_move_reverse_cooldown=180: 上一次反向 rapid_move 信号
+              不足 180 秒则跳过,消除"配对噪声"(~40% 信号为来回翻转)
+    v0.5.7 (2026-05-06):
+      - [NEW] check_direction_trend 极端 RSI 过滤(has_indicators=True 时):
+              short 方向但 RSI < 40 → 超卖不追空
+              long  方向但 RSI > 75 → 超买不追多
+              对应新参数: trend_rsi_oversold_guard=40, trend_rsi_overbought_guard=75
+    v0.5.6 (2026-05-01):
+      - [NEW] check_rapid_move 加 indicators 参数:
+              读取 rsi_5m / vol_ratio,vol_ratio < 0.8 时压制低量噪音
+              master ticker 传实际 indicators,followers 传 None
     v0.5.5 (2026-04-24):
       - [FIX] direction_trend 全天刷 STRONG 看空的问题:
               1. STRONG 门槛提高: abs(day_chg)>=1.5 → >=2.0
@@ -37,9 +62,12 @@ DEFAULT_PARAMS = {
     "drawdown_pct":         0.8,
 
     # v0.5.5: 快速异动阈值提高,冷却加长
-    "rapid_move_pct":       0.8,     # ← 0.4 → 0.8
-    "rapid_move_window":    120,
-    "rapid_move_cooldown":  1200,    # ← 600 → 1200 (20分钟)
+    "rapid_move_pct":             0.8,    # master ticker (RKLB) 阈值
+    "rapid_move_pct_follower":    1.20,   # v0.5.17: follower (RKLX/RKLZ) 独立阈值
+    "rapid_move_window":          120,
+    "rapid_move_cooldown":        1200,   # ← 600 → 1200 (20分钟)
+    "rapid_move_reverse_cooldown": 180,   # v0.5.17: 反向信号最小间隔 180s
+    "rapid_move_rsi_short_guard":  70,    # v0.5.17: RSI>70 时屏蔽 SHORT rapid_move
 
     "rsi_overbought_strong": 65,
     "rsi_oversold_strong":   40,
@@ -56,6 +84,9 @@ DEFAULT_PARAMS = {
     "trend_day_change_strong": 2.0,  # ← 新增:STRONG 需要 >=2%
     "trend_rsi_long":        52,
     "trend_rsi_short":       48,
+    "trend_rsi_overbought_guard": 75,   # long 方向但 RSI > 75 → 超买不追多
+    "trend_rsi_oversold_guard":   38,   # short 方向但 RSI < 38 → 超卖不追空 (v0.5.17: 40→38)
+    "trend_vol_ratio_short_guard": 0.8, # v0.5.18: short 方向量比必须 >= 0.8,无量回调不推空
     "trend_cooldown_sec":    1200,
 
     "swing_cooldown_weak":   900,
@@ -149,7 +180,7 @@ def check_profit_target(session, ticker, params=None):
 
     if pl_val >= params["profit_target_usd"] or pl_pct >= params["profit_target_pct"]:
         cool_key = f"profit_target_{ticker}"
-        if not session.can_trigger(cool_key, cooldown_sec=300):
+        if not session.can_trigger(cool_key, cooldown_sec=600):
             return None
         session.mark_triggered(cool_key)
 
@@ -302,15 +333,25 @@ def check_direction_trend(session, ticker, indicators, params=None):
         return None
 
     has_indicators = bool(indicators and indicators.get("data_ok"))
-    rsi = indicators.get("rsi_5m", 50) if has_indicators else 50
+    rsi       = indicators.get("rsi_5m",    50) if has_indicators else 50
+    vol_ratio = indicators.get("vol_ratio",  1) if has_indicators else None
 
     # 判断方向
     if day_chg >= params["trend_day_change_pct"]:
         if has_indicators and rsi < params["trend_rsi_long"]:
             return None
+        # 超买区不追多(RSI 过高说明已经拉过头,容易回踩)
+        if has_indicators and rsi > params["trend_rsi_overbought_guard"]:
+            return None
         direction, emoji, word = "long", "🚀", "看多"
     elif day_chg <= -params["trend_day_change_pct"]:
         if has_indicators and rsi > params["trend_rsi_short"]:
+            return None
+        # 超卖区不追空(RSI 过低说明已经砸过头,容易反弹)
+        if has_indicators and rsi < params["trend_rsi_oversold_guard"]:
+            return None
+        # v0.5.18: 量比不足 0.8 = 无量回调,不视为真空头
+        if vol_ratio is not None and vol_ratio < params.get("trend_vol_ratio_short_guard", 0.8):
             return None
         direction, emoji, word = "short", "📉", "看空"
     else:
@@ -351,7 +392,7 @@ def check_direction_trend(session, ticker, indicators, params=None):
         "direction": direction, "strength": strength,
         "data": {
             "day_change_pct": day_chg, "rsi": rsi,
-            "vol_ratio": indicators.get("vol_ratio", 1) if has_indicators else 1,
+            "vol_ratio": vol_ratio if vol_ratio is not None else 1,
             "vwap": indicators.get("vwap", 0) if has_indicators else 0,
             "current": session.get_last_price(ticker),
             "session_high": indicators.get("session_high") if has_indicators else None,
@@ -363,10 +404,10 @@ def check_direction_trend(session, ticker, indicators, params=None):
     }
 
 
-def check_rapid_move(session, ticker, params=None):
+def check_rapid_move(session, ticker, indicators=None, params=None):
     """
-    v0.5.5: 阈值 0.4% → 0.8%,冷却 600s → 1200s
-    加震荡市过滤
+    v0.5.5: 阈值 0.4% → 0.8%,冷却 600s → 1200s,加震荡市过滤
+    v0.5.6: 从 indicators 读取 rsi_5m / vol_ratio,低量噪音压制
     """
     params = params or DEFAULT_PARAMS
     chg = session.get_price_change_pct(ticker, params["rapid_move_window"])
@@ -374,16 +415,38 @@ def check_rapid_move(session, ticker, params=None):
         return None
 
     if abs(chg) >= params["rapid_move_pct"]:
-        # v0.5.5: 震荡市过滤
+        # 震荡市过滤
         if _is_choppy(session, ticker,
                       window_pts=params["choppy_window_pts"],
                       ratio=params["choppy_ratio"]):
+            return None
+
+        # 读取 indicators
+        has_ind = bool(indicators and indicators.get("data_ok"))
+        rsi = indicators.get("rsi_5m", 50) or 50 if has_ind else None
+        vol_ratio = indicators.get("vol_ratio", 1) or 1 if has_ind else None
+
+        # 低量成交压制:成交量不足均量 80% 认为是噪音
+        if vol_ratio is not None and vol_ratio < 0.8:
+            return None
+
+        # v0.5.17: RSI 过高时屏蔽 SHORT 急跌(真实数据 RSI>70 SHORT 准确率 0%)
+        rsi_short_guard = params.get("rapid_move_rsi_short_guard", 70)
+        if chg < 0 and rsi is not None and rsi > rsi_short_guard:
             return None
 
         direction_key = "up" if chg > 0 else "down"
         cool_key = f"rapid_{ticker}_{direction_key}"
         if not session.can_trigger(cool_key, cooldown_sec=params["rapid_move_cooldown"]):
             return None
+
+        # v0.5.17: 反向冷却 — 上一次反向信号不足 180s 则跳过
+        opp_dir_key = "down" if direction_key == "up" else "up"
+        opp_cool_key = f"rapid_{ticker}_{opp_dir_key}"
+        rev_cd = params.get("rapid_move_reverse_cooldown", 180)
+        if not session.can_trigger(opp_cool_key, cooldown_sec=rev_cd):
+            return None
+
         session.mark_triggered(cool_key)
 
         direction_word = "急涨" if chg > 0 else "急跌"
@@ -397,6 +460,8 @@ def check_rapid_move(session, ticker, params=None):
                 "window_sec": params["rapid_move_window"],
                 "current": session.get_last_price(ticker),
                 "direction": direction_word,
+                "rsi": rsi,
+                "vol_ratio": vol_ratio,
             },
             "title": f"⚡ {ticker.replace('US.','')} {direction_word} {chg:+.2f}%",
         }
@@ -476,7 +541,7 @@ def run_all_triggers(session, master_ticker, followers, indicators, params=None)
             if h:
                 hits.append(h)
 
-    master_rapid = check_rapid_move(session, master_ticker, params)
+    master_rapid = check_rapid_move(session, master_ticker, indicators, params)
     if master_rapid:
         hits.append(master_rapid)
 
@@ -486,8 +551,10 @@ def run_all_triggers(session, master_ticker, followers, indicators, params=None)
     elif trend_hit:
         master_dir = trend_hit["direction"]
 
+    # v0.5.17: follower 标的使用更高的 rapid_move 阈值(1.20%)
+    follower_params = {**params, "rapid_move_pct": params.get("rapid_move_pct_follower", params["rapid_move_pct"])}
     for tk in followers:
-        fh = check_rapid_move(session, tk, params)
+        fh = check_rapid_move(session, tk, None, follower_params)
         if fh:
             if master_dir and _is_linked(tk, fh["direction"], master_ticker, master_dir):
                 continue
