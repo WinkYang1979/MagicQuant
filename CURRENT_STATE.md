@@ -1,6 +1,6 @@
 # MagicQuant — 当前线上状态快照
 
-> **最后更新**: 2026-04-24 (swing v0.5.5 复盘修复)
+> **最后更新**: 2026-05-11 (pusher v0.5.20 副驾驶语言规范)
 > **维护原则**: 每次改完代码,AI 自动生成新版,用户直接下载覆盖,不手改。
 > **新对话接手入口**: 读本文件 + COLLABORATION_RULES.md,两行搞定。
 
@@ -12,21 +12,20 @@
 |---|---|---|---|
 | realtime_quote.py | core/ | v0.5.4 | ✅ 已部署 |
 | context.py | core/focus/ | v0.5.2 | ✅ 已部署 |
-| **swing_detector.py** | core/focus/ | **v0.5.5** 🆕 | ⏳ 待部署 |
-| **pusher.py** | core/focus/ | **v0.5.13** 🆕 | ⏳ 待部署 |
-| **focus_manager.py** | core/focus/ | **v0.5.10** 🆕 | ⏳ 待部署 |
+| swing_detector.py | core/focus/ | v0.5.21 | ✅ 已部署 |
+| **pusher.py** | core/focus/ | **v0.5.20** 🆕 | ⏳ 待部署 |
+| focus_manager.py | core/focus/ | v0.5.20 | ✅ 已部署 |
 | market_clock.py | core/focus/ | v0.2.0 | ✅ 已部署 |
 | event_calendar.py | core/focus/ | v0.1.0 | ✅ 已部署 |
 | activity_profile.py | core/focus/ | v0.1.0 | ✅ 已部署 |
 | proactive_reminder.py | core/focus/ | v0.1.0 | ✅ 已部署 |
 | pairs.py | core/focus/ | 无版本号 | ✅ 已部署 |
-| **bot_controller.py** | bot/ | **v0.5.13** 🆕 | ⏳ 待部署 |
+| bot_controller.py | bot/ | v0.5.13 | ✅ 已部署 |
+| **signal_engine.py** | core/ | **v0.1.0 [LEGACY]** 🆕 | ⏳ 待部署 |
 
-**⏳ 待部署的 4 个文件已生成,直接下载覆盖**:
-- `core/focus/swing_detector.py`
+**⏳ 待部署的 2 个文件**:
 - `core/focus/pusher.py`
-- `core/focus/focus_manager.py`
-- `bot/bot_controller.py`
+- `core/signal_engine.py`
 
 **GitHub**: https://github.com/WinkYang1979/MagicQuant
 
@@ -70,6 +69,14 @@
 
 ## ✅ 已修复 bug 清单
 
+### 2026-05-11
+| # | 改动 | 版本 |
+|---|---|---|
+| #7 | 删除 `ACCOUNT_SIZE_USD=20000` 硬编码；`get_available_cash(None)` 改返回 0 | pusher v0.5.20 |
+| #8 | 信号推送软化语言：`🛒 买入` → `📋 可考虑介入` + "仓位由你决定" | pusher v0.5.20 |
+| #9 | 信号格式加行情/方向/免责三行；风险提醒加"不是卖出信号"声明 | pusher v0.5.20 |
+| #10 | signal_engine.py 加 [LEGACY] 标记，修复硬编码路径 | signal_engine |
+
 ### 2026-04-24
 | # | Bug | 修复版本 |
 |---|---|---|
@@ -99,6 +106,7 @@
 1. **PEAK+ 频率 vs Futu 配额**:0.5s 主循环可能超免费版上限,需评估
 2. **审查报告遗留**:stop_focus() 锁内 join / fetch_account sanity check / 单例互斥
 3. **swing 指标根因**:has_indicators 永远 False 的深层原因未定位(v0.5.5 已加 workaround)
+4. **复盘报告新格式**（MagicQuant_update_v2.md Req 8）:需新增 review_analyzer.py，P2 推迟
 
 ### P2 — 中长期
 4. 清理 .bak 文件
@@ -186,5 +194,9 @@ data/review/YYYY-MM-DD/
 | 2026-04-23 上午 | pusher v0.5.12:双路推送 + 手续费 + 信心指数 |
 | 2026-04-23 下午 | bot v0.5.13:Focus cache + AI 三级 fallback + 40% 约束 |
 | 2026-04-23 晚 | pusher v0.5.13 + focus_manager v0.5.10:复盘日志 |
-| **2026-04-24** | **swing v0.5.5:降噪 84%,震荡过滤 + rapid_move 提高阈值** |
+| 2026-04-24 | swing v0.5.5:降噪 84%,震荡过滤 + rapid_move 提高阈值 |
+| 2026-05-06~09 | swing v0.5.17-v0.5.21:多空过滤升级 + 风险提醒触发器 |
+| 2026-05-09 | focus_manager v0.5.20:趋势锁定机制上线 |
+| 2026-05-11 | pusher v0.5.19:T1/T2/止损目标价 + 信心进度条 + 仓位分级 |
+| **2026-05-11** | **pusher v0.5.20:副驾驶语言规范 — 去强制指令 + 免责声明 + 行情/方向标签** |
 | 下次变更 | review_analyzer.py 或 core/strategy/ 架构 |

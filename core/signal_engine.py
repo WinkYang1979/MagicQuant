@@ -2,6 +2,10 @@
 MagicQuant 慧投 - Signal Engine v0.1.0
 Dare to dream. Data to win.
 
+# [LEGACY] research-only, disabled by default
+# 正式信号链路已迁移至 core/focus/ (swing_detector + pusher + focus_manager)
+# 本模块仅保留作回测/研究用途，不推送 Telegram 信号
+
 Run: python core\signal_engine.py --once
 """
 
@@ -11,12 +15,13 @@ import pandas as pd
 import numpy as np
 
 # ── Config ────────────────────────────────────────────────────────
+_BASE_DIR    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOST         = "127.0.0.1"
 PORT         = 11111
-ACCOUNT_SIZE = 20000
+ACCOUNT_SIZE = 20000  # [LEGACY] 仅供研究参考，不用于真实仓位计算
 KL_NUM       = 90
-SIGNALS_FILE = r"C:\MagicQuant\data\signals_latest.json"
-WATCHLIST    = r"C:\MagicQuant\config\watchlist.json"
+SIGNALS_FILE = os.path.join(_BASE_DIR, "data", "signals_latest.json")
+WATCHLIST    = os.path.join(_BASE_DIR, "config", "watchlist.json")
 
 TICKER_CONFIG = {
     "US.TSLA": {"name": "Tesla",         "style": "swing"},
@@ -184,15 +189,11 @@ def generate_signal(rsi, macd_hist, pct_b, vol_ratio, mas, patterns):
     return signal, confidence, reasons, min(5, urgency)
 
 
-def get_positions():
+def get_positions(trd_ctx):
+    """查询持仓和账户信息，复用外部传入的 trd_ctx，不自行管理连接生命周期"""
     positions = {}
     account_info = {}
     try:
-        trd_ctx = OpenSecTradeContext(
-            host=HOST, port=PORT,
-            filter_trdmarket=TrdMarket.US,
-            security_firm=SecurityFirm.FUTUAU
-        )
         ret, data = trd_ctx.position_list_query(trd_env=TrdEnv.REAL)
         if ret == RET_OK and len(data) > 0:
             for _, row in data.iterrows():
@@ -215,7 +216,6 @@ def get_positions():
                 "market_val": round(float(row.get("market_val", 0)), 2),
             }
             print(f"  账户: 现金=${account_info['cash']:,.2f} 总资产=${account_info['total_assets']:,.2f}")
-        trd_ctx.close()
     except Exception as e:
         print(f"  持仓查询: {e}")
     return positions, account_info
@@ -342,14 +342,18 @@ def save_json(results, account_info=None):
 def main(run_once=False, interval=300):
     print(f"\n  Connecting FutuOpenD ({HOST}:{PORT})...")
     quote_ctx = OpenQuoteContext(host=HOST, port=PORT)
-    positions, account_info = get_positions()
-    if positions:
-        print(f"  Positions: {list(positions.keys())}")
+    trd_ctx = OpenSecTradeContext(
+        host=HOST, port=PORT,
+        filter_trdmarket=TrdMarket.US,
+        security_firm=SecurityFirm.FUTUAU
+    )
     try:
         while True:
-            # v0.2.2: 每轮先刷新持仓,再决定要分析哪些票
-            positions, account_info = get_positions()
-            tickers = get_tickers(positions)   # ← 传入 positions 自动合并
+            # 每轮刷新持仓，再决定要分析哪些票（quote_ctx/trd_ctx 全程复用，不重复断连）
+            positions, account_info = get_positions(trd_ctx)
+            if positions:
+                print(f"  Positions: {list(positions.keys())}")
+            tickers = get_tickers(positions)
             results = [fetch_and_analyze(quote_ctx, t, positions) for t in tickers]
             print_report(results)
             save_json(results, account_info)
@@ -360,6 +364,7 @@ def main(run_once=False, interval=300):
         print("\n  Stopped.")
     finally:
         quote_ctx.close()
+        trd_ctx.close()
 
 
 if __name__ == "__main__":

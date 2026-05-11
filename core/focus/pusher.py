@@ -1,37 +1,43 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — pusher.py
-  VERSION : v0.5.13
-  DATE    : 2026-04-23
+  VERSION : v0.5.20
+  DATE    : 2026-05-11
   CHANGES :
+    v0.5.20 (2026-05-11):
+      - [FIX] 删除 ACCOUNT_SIZE_USD=20000 硬编码兜底;
+              get_available_cash(None) 改为返回 0 + 打 ERROR 日志
+      - [FIX] 仓位建议语言去除"买入/卖出"直接指令;
+              Scenario A/B 改为"可考虑介入"/"可考虑顺势建" + "仓位由你决定"
+      - [NEW] 信号推送加三行: 行情类型 / 方向偏向 / 免责声明"这是方向参考，不是下单指令"
+      - [NEW] 风险提醒推送末尾加"这是风险提醒，不是卖出信号"声明
+      - [NEW] _market_regime_label() / _action_intent_label() 辅助函数
+    v0.5.19 (2026-05-11):
+      - [NEW] 信号推送全面重设计 — "明确操作指令 + 利润最大化":
+              信号强度进度条 _strength_bar() [████████░░] 85%
+              仓位比例按信心分级: 90%+ → 九成仓 / 80-90% → 七成仓
+                                  60-80% → 四成仓 / <60% → 三成仓
+              _pct_by_conf() / _pct_label() 替代固定 STRONG/WEAK 仓位
+      - [NEW] 目标价 T1/T2 重算:
+              候选: 近20点最高(低)点 / 最近$5整数关口 / 当前价±ATR×2.0
+              取距入场价最近的作 T1,次近的作 T2
+              止损: 当前价 ± ATR×1.5
+      - [NEW] _fmt_price_targets() 完整重写 — T1/T2/止损/盈亏比一行展示
+      - [NEW] _calc_price_targets() 重写 — ATR估算 + 多候选价位去重
+      - [NEW] 仓位方案 Scenario A/B 使用新信心-仓位体系
+      - [NEW] 新触发器推送格式: near_resistance / near_support /
+              overbought_surge / large_day_gain
+    v0.5.14 (2026-05-06):
+      - [NEW] _calc_price_targets(): 波峰/波谷预测
     v0.5.13 (2026-04-23):
-      - [NEW] _log_trigger() 自动日志:每次推送触发写入
-              data/review/YYYY-MM-DD/triggers.json
-              便于第二天自动复盘,不用再截图
+      - [NEW] _log_trigger() 自动日志
     v0.5.12 (2026-04-23):
-      - [NEW] Moomoo AU 往返手续费估算 _estimate_roundtrip_fee()
-              浮盈/浮亏显示多出"扣费后亏损"行
-      - [NEW] 信心指数 _confidence_score() 显示在信号标题下
-              综合 strength + RSI + 量比 打分 0-100
-      - [FIX] scenario B(反向持仓)Step 2 资金计算:
-              平反向仓释放的现金会加入 Step 2 建多预算
-              之前因 get_available_cash 拿不到真实现金导致 Step 2 经常缺失
-      - [FIX] scenario B Step 2 三种资金状态清晰呈现:
-              足够→显示完整建仓计划  不足→显示总钱数但不建仓  报价缺失→提示手动
-      - [NEW] get_available_cash() 诊断日志,兜底时打印到控制台
+      - [NEW] 往返手续费估算 / 信心指数 / scenario B Step 2 重写
     v0.5.11 (2026-04-22):
-      - [NEW] 推送抬头加入 activity_profile tag
-              🔥黄金 / 🔥🔥极致 / 🧙 / 📆 / ⚡周一 等标签
-              一眼看出此信号是什么等级时段 + 事件日触发
-      - 依赖 activity_profile v0.1.0
-    v0.5.10 (2026-04-22):
-      - 推送抬头加市场时段标签 🟢盘中 / 🌃夜盘 等
-    v0.5.9 (2026-04-22):
-      - [FIX] C 场景加仓"资金不足"的 bug
-              加仓最低门槛 $2000 → $500
+      - [NEW] activity_profile tag
   DEPENDS :
     context.py           ≥ v0.5.2
-    swing_detector.py    ≥ v0.5.4
+    swing_detector.py    ≥ v0.5.21
     market_clock.py      ≥ v0.2.0
     activity_profile.py  ≥ v0.1.0
   OWNER   : laoyang
@@ -41,8 +47,8 @@
 from datetime import datetime
 from typing import Optional
 
-VERSION = "v0.5.13"
-SWING_VERSION = "v0.5.4"
+VERSION = "v0.5.20"
+SWING_VERSION = "v0.5.21"
 
 try:
     from .pairs import get_long_tools, get_short_tools, classify_follower
@@ -144,9 +150,61 @@ def _confidence_emoji(score: int) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════
+#  v0.5.19 信号强度进度条 / 信心→仓位映射
+# ══════════════════════════════════════════════════════════════════
+def _strength_bar(pct: int, width: int = 10) -> str:
+    """生成进度条, 如 [████████░░] 80%"""
+    filled = max(0, min(width, round(pct / 100 * width)))
+    return f"[{'█' * filled}{'░' * (width - filled)}] {pct}%"
+
+
+def _pct_by_conf(conf: int) -> float:
+    """信心指数 → 仓位比例 (占可用现金)"""
+    if conf >= 90: return 0.90
+    if conf >= 80: return 0.70
+    if conf >= 60: return 0.40
+    return 0.30
+
+
+def _pct_label(conf: int) -> str:
+    """仓位比例中文标签"""
+    if conf >= 90: return "九成仓"
+    if conf >= 80: return "七成仓"
+    if conf >= 60: return "四成仓"
+    return "三成仓"
+
+
+def _market_regime_label(hit: dict) -> str:
+    """从 hit data 推断行情类型（中文），用于信号推送"行情:"行"""
+    d = hit.get("data", {}) or {}
+    has_ind = d.get("has_indicators", False)
+    if not has_ind:
+        return "数据不足"
+    vol_ratio = d.get("vol_ratio", 1) or 1
+    rsi       = d.get("rsi", 50) or 50
+    if vol_ratio >= 1.5 and 40 < rsi < 70:
+        return "趋势行情"
+    if vol_ratio < 0.8:
+        return "噪音行情"
+    return "混合行情"
+
+
+def _action_intent_label(conf: int, direction: str) -> str:
+    """信心 + 方向 → 操作意图中文（参考 action_intent 规范）"""
+    if direction == "long":
+        if conf >= 80: return "可轻仓偏多"
+        if conf >= 60: return "等回调再进"
+        return "等待，暂时观望"
+    if direction == "short":
+        if conf >= 80: return "可轻仓偏空"
+        if conf >= 60: return "等突破确认"
+        return "等待，暂时观望"
+    return "等待，暂时观望"
+
+
+# ══════════════════════════════════════════════════════════════════
 #  交易参数
 # ══════════════════════════════════════════════════════════════════
-ACCOUNT_SIZE_USD    = 20000
 STRONG_POSITION_PCT = 0.70
 WEAK_POSITION_PCT   = 0.50
 MAX_BUDGET_USD      = 15000
@@ -306,9 +364,9 @@ def get_available_cash(session) -> float:
         cash = getattr(session, "cash_available", None)
         if cash is not None and cash >= 0:
             return float(cash)
-    # v0.5.12: 诊断兜底情况,便于下次排查 Step 2 缺失问题
-    print(f"  [pusher] ⚠️ session.cash_available=None, using fallback ${ACCOUNT_SIZE_USD*0.5:,.0f}")
-    return ACCOUNT_SIZE_USD * 0.5
+    # v0.5.20: 禁止硬编码金额兜底，返回 0 强制手动确认
+    print("  [pusher] ❌ session.cash_available=None, 返回 0 — 仓位建议不可用，请手动确认")
+    return 0.0
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -397,12 +455,19 @@ def analyze_position_conflict(session, signal_direction: str) -> dict:
     }
 
 
-def _build_action_plan(session, signal_direction, strength, conflict):
+def _build_action_plan(session, signal_direction, strength, conflict,
+                       conf: int = 70, targets: dict = None):
+    """
+    v0.5.19: 加入 conf(信心指数) 和 targets(T1/T2/止损)
+    Scenario A: 空仓时使用信心→仓位比例 + T1/T2/止损展示
+    Scenario B: 反向持仓时 Step 2 也使用信心→仓位比例
+    """
     scenario   = conflict["scenario"]
     same_etf   = conflict["same_etf"]
     rev_etf    = conflict["reverse_etf"]
     same_short = (same_etf or "").replace("US.", "")
     rev_short  = (rev_etf  or "").replace("US.", "")
+    targets    = targets or {}
 
     lines = []
     buttons = []
@@ -412,33 +477,48 @@ def _build_action_plan(session, signal_direction, strength, conflict):
 
     # ── A 空仓 ────────────────────────────────────────────
     if scenario == "A":
-        plan = plan_by_strength(same_price, strength, session) if same_price else None
-        if not plan:
-            lines.append(f"🎯 {same_short}(报价失败,手动确认)")
+        if not same_price:
+            lines.append(f"📋 {same_short}(报价失败,请手动确认)")
             return {"scenario": "A", "lines": lines, "buttons": [], "caches": []}
-        if plan.get("insufficient_cash"):
+
+        cash = get_available_cash(session)
+        pct = _pct_by_conf(conf)
+        pct_lbl = _pct_label(conf)
+        budget = min(cash * pct, MAX_BUDGET_USD)
+
+        if budget < MIN_BUDGET_USD:
             lines += [
                 f"⚠️ <b>可用资金不足</b>",
-                f"可用 ${plan['budget_usd']:,.0f} < 最低 ${plan['min_required']:,.0f}",
+                f"可用 ${cash:,.0f} × {pct*100:.0f}% = ${budget:,.0f} < 最低 ${MIN_BUDGET_USD:,.0f}",
             ]
             return {"scenario": "A", "lines": lines, "buttons": [], "caches": []}
 
-        pct_tag = "七成仓" if strength == "STRONG" else "半仓"
-        cash_info = f"  /  可用 ${get_available_cash(session):,.0f}"
+        qty = max(1, int(budget / same_price))
+        notional = round(qty * same_price, 2)
+
         lines += [
-            f"🎯 <b>{same_short} × {plan['qty']} 股</b>  "
-            f"(${plan['notional']:,.0f} / {pct_tag}{cash_info})",
-            f"入场 {_money(plan['entry'])}  "
-            f"目标 {_money(plan['target'])} (+${plan['target_usd']:.0f})  "
-            f"止损 {_money(plan['stop'])} (-${plan['stop_usd']:.0f})",
+            f"📋 <b>可考虑介入: {same_short}  ×  {qty} 股</b>  @  {_money(same_price)}",
+            f"   参考仓位 {pct_lbl}: {_money(notional, ',.0f')}  /  可用 {_money(cash, ',.0f')}",
+            f"   仓位由你决定",
         ]
+        # 目标价 T1/T2/止损
+        tgt_str = _fmt_price_targets(targets, signal_direction, same_price)
+        if tgt_str:
+            lines.append(tgt_str)
+
+        t1_price   = targets.get("t1")
+        stop_price = targets.get("stop")
         buttons.append([
-            {"text": f"📋 买 {plan['qty']}股 {same_short}",
+            {"text": f"📋 买 {qty}股 {same_short}",
              "callback_data": f"focus_order_{same_short}"},
         ])
         caches.append((same_short, {
-            **plan, "action": "BUY", "ticker": same_short,
-            "price": plan["entry"], "qty": plan["qty"],
+            "action": "BUY", "ticker": same_short,
+            "price": same_price, "qty": qty,
+            "entry": same_price, "notional": notional,
+            "target": t1_price, "stop": stop_price,
+            "target_usd": round((t1_price - same_price) * qty, 2) if t1_price else 0,
+            "stop_usd":   round((same_price - stop_price) * qty, 2) if stop_price else 0,
         }))
 
     # ── B 反向持仓 ──(v0.5.12 重写:双路建议 + 释放现金重算)──
@@ -478,50 +558,50 @@ def _build_action_plan(session, signal_direction, strength, conflict):
             "reason": f"先平反向,准备买 {same_short}",
         }))
 
-        # Step 2: 用 total_after_sell 重新算建仓预算
+        # Step 2: 用 total_after_sell 重新算建仓预算 (v0.5.19: 改用信心→仓位比例)
         if same_price and same_price > 0:
-            pct = STRONG_POSITION_PCT if strength == "STRONG" else WEAK_POSITION_PCT
-            target_usd = STRONG_TARGET_USD if strength == "STRONG" else WEAK_TARGET_USD
-            stop_usd = STRONG_STOP_USD if strength == "STRONG" else WEAK_STOP_USD
-
+            pct = _pct_by_conf(conf)
+            pct_lbl = _pct_label(conf)
             budget = min(total_after_sell * pct, MAX_BUDGET_USD)
-            plan = calc_trade_plan(same_price, budget, target_usd, stop_usd)
-        else:
-            plan = None
-
-        if plan and not plan.get("insufficient_cash"):
-            pct_tag = "七成仓" if strength == "STRONG" else "半仓"
-            rest_after_buy = total_after_sell - plan['notional']
-            lines += [
-                f"",
-                f"🅱️ <b>Step 2 — 顺势建多 {same_short}</b>",
-                f"总现金: ${current_cash:,.0f}(现)+ ${released_cash_net:,.0f}(释放)= ${total_after_sell:,.0f}",
-                f"仓位 {pct_tag}: 买 {plan['qty']} 股 @{_money(plan['entry'])}  (${plan['notional']:,.0f})",
-                f"目标 {_money(plan['target'])} (+${plan['target_usd']:.0f})  "
-                f"止损 {_money(plan['stop'])} (-${plan['stop_usd']:.0f})",
-                f"剩余 ~${rest_after_buy:,.0f}",
-            ]
-            caches.append((same_short, {
-                **plan, "action": "BUY", "ticker": same_short,
-                "price": plan["entry"], "qty": plan["qty"],
-            }))
-            buttons += [
-                [{"text": f"1️⃣ 卖 {rev_qty:.0f}股 {rev_short}",
-                  "callback_data": f"focus_order_{rev_short}"}],
-                [{"text": f"2️⃣ 买 {plan['qty']}股 {same_short}",
-                  "callback_data": f"focus_order_{same_short}"}],
-            ]
-        elif plan and plan.get("insufficient_cash"):
-            # 即使平仓释放后,总钱仍不够建仓门槛
-            min_req = plan.get('min_required', MIN_BUDGET_USD)
-            lines += [
-                f"",
-                f"🅱️ <b>Step 2 — 资金不足,平仓后观望</b>",
-                f"平仓后总现金 ${total_after_sell:,.0f} < ${min_req:,.0f} 最低建仓门槛",
-                f"建议:先平 Step 1 保留子弹,等下一个更强信号",
-            ]
-            buttons.append([{"text": f"1️⃣ 卖 {rev_qty:.0f}股 {rev_short}",
-                             "callback_data": f"focus_order_{rev_short}"}])
+            t1_price   = targets.get("t1")
+            stop_price = targets.get("stop")
+            if budget >= MIN_BUDGET_USD:
+                qty2 = max(1, int(budget / same_price))
+                notional2 = round(qty2 * same_price, 2)
+                rest_after_buy = total_after_sell - notional2
+                lines += [
+                    f"",
+                    f"🅱️ <b>Step 2 — 可考虑顺势建 {same_short}</b>",
+                    f"总现金: ${current_cash:,.0f}(现)+ ${released_cash_net:,.0f}(释放)= ${total_after_sell:,.0f}",
+                    f"📋 {same_short} × {qty2} 股 @{_money(same_price)}  ({pct_lbl} ${notional2:,.0f})",
+                    f"   仓位由你决定",
+                ]
+                tgt_str2 = _fmt_price_targets(targets, signal_direction, same_price)
+                if tgt_str2:
+                    lines.append(tgt_str2)
+                lines.append(f"剩余 ~${rest_after_buy:,.0f}")
+                caches.append((same_short, {
+                    "action": "BUY", "ticker": same_short,
+                    "price": same_price, "qty": qty2,
+                    "entry": same_price, "notional": notional2,
+                    "target": t1_price, "stop": stop_price,
+                }))
+                buttons += [
+                    [{"text": f"1️⃣ 卖 {rev_qty:.0f}股 {rev_short}",
+                      "callback_data": f"focus_order_{rev_short}"}],
+                    [{"text": f"2️⃣ 买 {qty2}股 {same_short}",
+                      "callback_data": f"focus_order_{same_short}"}],
+                ]
+            else:
+                # 资金不足
+                lines += [
+                    f"",
+                    f"🅱️ <b>Step 2 — 资金不足,平仓后观望</b>",
+                    f"平仓后总现金 ${total_after_sell:,.0f} < ${MIN_BUDGET_USD:,.0f} 最低建仓门槛",
+                    f"建议:先平 Step 1 保留子弹,等下一个更强信号",
+                ]
+                buttons.append([{"text": f"1️⃣ 卖 {rev_qty:.0f}股 {rev_short}",
+                                 "callback_data": f"focus_order_{rev_short}"}])
         else:
             # same_price 缺失(报价失败)
             lines += [
@@ -548,16 +628,25 @@ def _build_action_plan(session, signal_direction, strength, conflict):
             f"<b>🅰️ 继续持有</b>",
         ]
 
-        # 目标/止损基于当前成本
-        tgt_usd  = STRONG_TARGET_USD if strength == "STRONG" else WEAK_TARGET_USD
-        stop_usd = STRONG_STOP_USD   if strength == "STRONG" else WEAK_STOP_USD
-        target_price = round(cur_cost + tgt_usd  / max(cur_qty, 1), 2)
-        stop_price   = round(cur_cost - stop_usd / max(cur_qty, 1), 2)
-        gap = (target_price - (same_price or cur_cost))
-        lines += [
-            f"  等目标 {_money(target_price)}  (还差 {gap:+.2f})",
-            f"  或止损 {_money(stop_price)}",
-        ]
+        # 目标/止损: 优先用 ATR targets,回退固定美元
+        t1_price   = targets.get("t1")
+        stop_price = targets.get("stop")
+        if t1_price and stop_price:
+            gap = t1_price - (same_price or cur_cost)
+            lines += [
+                f"  等目标 T1 {_money(t1_price)}  (还差 {gap:+.2f})",
+                f"  止损 {_money(stop_price)}  [ATR×1.5]",
+            ]
+        else:
+            tgt_usd  = STRONG_TARGET_USD if strength == "STRONG" else WEAK_TARGET_USD
+            stop_usd = STRONG_STOP_USD   if strength == "STRONG" else WEAK_STOP_USD
+            target_price = round(cur_cost + tgt_usd  / max(cur_qty, 1), 2)
+            stop_price_c = round(cur_cost - stop_usd / max(cur_qty, 1), 2)
+            gap = target_price - (same_price or cur_cost)
+            lines += [
+                f"  等目标 {_money(target_price)}  (还差 {gap:+.2f})",
+                f"  或止损 {_money(stop_price_c)}",
+            ]
 
         # ── v0.5.9 加仓:用 MIN_ADD_BUDGET_USD($500),不再用 $2000 ──
         cash       = get_available_cash(session)
@@ -747,6 +836,14 @@ def format_trigger_message(hit, session=None):
         result = _fmt_direction_trend(hit, session)
     elif trigger == "rapid_move":
         result = _fmt_rapid_move(hit, session)
+    elif trigger == "near_resistance":
+        result = _fmt_near_resistance(hit, session)
+    elif trigger == "near_support":
+        result = _fmt_near_support(hit, session)
+    elif trigger == "overbought_surge":
+        result = _fmt_overbought_surge(hit, session)
+    elif trigger == "large_day_gain":
+        result = _fmt_large_day_gain(hit, session)
     else:
         result = {"text": hit.get("title", "未知"), "buttons": None, "style": hit.get("style", "C")}
 
@@ -769,6 +866,88 @@ def _wrap_message(text, session, ticker, manual_cmd=None):
         wrapped += f"\n{manual_cmd}"
     wrapped += f"\n{_footer()}"
     return wrapped
+
+
+# ══════════════════════════════════════════════════════════════════
+#  v0.5.19 新触发类型推送格式
+# ══════════════════════════════════════════════════════════════════
+def _fmt_near_resistance(hit, session=None):
+    d            = hit["data"]
+    ticker_short = hit["ticker"].replace("US.", "")
+    current      = d.get("current", 0)
+    resistance   = d.get("resistance", 0)
+    dist_pct     = d.get("dist_pct", 0)
+    lines = [
+        f"⚠️ <b>{ticker_short} 准备卖出预警</b>",
+        f"━━━━━━━━━━━━━━",
+        f"现价 {_money(current)}  /  阻力 {_money(resistance)}",
+        f"还有 <b>{dist_pct:.1f}%</b> 到目标阻力位",
+        f"",
+        f"💡 持有 RKLX 建议准备分批止盈，不要等到顶",
+        f"",
+        f"这是风险提醒，不是卖出信号。",
+    ]
+    lines += _trio_block(session)
+    return {"text": "\n".join(lines), "buttons": [], "style": "C"}
+
+
+def _fmt_near_support(hit, session=None):
+    d            = hit["data"]
+    ticker_short = hit["ticker"].replace("US.", "")
+    current      = d.get("current", 0)
+    support      = d.get("support", 0)
+    dist_pct     = d.get("dist_pct", 0)
+    lines = [
+        f"💡 <b>{ticker_short} 接近支撑位预警</b>",
+        f"━━━━━━━━━━━━━━",
+        f"现价 {_money(current)}  /  支撑 {_money(support)}",
+        f"还有 <b>{dist_pct:.1f}%</b> 到支撑位",
+        f"",
+        f"💡 看多 RKLX 布局机会临近，等确认再进",
+        f"",
+        f"这是风险提醒，不是买入信号。",
+    ]
+    lines += _trio_block(session)
+    return {"text": "\n".join(lines), "buttons": [], "style": "C"}
+
+
+def _fmt_overbought_surge(hit, session=None):
+    d            = hit["data"]
+    ticker_short = hit["ticker"].replace("US.", "")
+    rsi          = d.get("rsi", 80)
+    vol_ratio    = d.get("vol_ratio", 3)
+    day_chg      = d.get("day_change_pct", 0) or 0
+    lines = [
+        f"🔥 <b>{ticker_short} 超买放量</b>",
+        f"━━━━━━━━━━━━━━",
+        f"RSI <b>{rsi:.1f}</b>  量比 <b>{vol_ratio:.1f}x</b>  日内 {day_chg:+.2f}%",
+        f"",
+        f"⚠️ RSI 过热 + 放量 = 顶部风险，持有 RKLX 考虑逐步锁定利润",
+        f"",
+        f"这是风险提醒，不是卖出指令。",
+    ]
+    lines += _trio_block(session)
+    buttons = [[{"text": "🧠 AI", "callback_data": f"focus_ai_{ticker_short}"}]]
+    return {"text": "\n".join(lines), "buttons": buttons, "style": "B"}
+
+
+def _fmt_large_day_gain(hit, session=None):
+    d            = hit["data"]
+    ticker_short = hit["ticker"].replace("US.", "")
+    day_chg      = d.get("day_change_pct", 0) or 0
+    current      = d.get("current", 0)
+    lines = [
+        f"🚀 <b>{ticker_short} 大幅上涨 {day_chg:+.1f}%</b>",
+        f"━━━━━━━━━━━━━━",
+        f"现价 {_money(current)}  日内 {day_chg:+.2f}%",
+        f"",
+        f"⚠️ 大涨后回调风险增加，建议逐步锁定利润，不建议此时追加买入",
+        f"",
+        f"这是风险提醒，不是卖出指令。",
+    ]
+    lines += _trio_block(session)
+    buttons = [[{"text": "🧠 AI", "callback_data": f"focus_ai_{ticker_short}"}]]
+    return {"text": "\n".join(lines), "buttons": buttons, "style": "B"}
 
 
 # ── 浮盈达标 ──────────────────────────────────────────────
@@ -870,26 +1049,163 @@ def _fmt_drawdown(hit, session=None):
     return {"text": "\n".join(lines), "buttons": buttons, "style": "B"}
 
 
+# ══════════════════════════════════════════════════════════════════
+#  v0.5.19 目标价计算（T1/T2/止损 三档）
+# ══════════════════════════════════════════════════════════════════
+def _calc_price_targets(session, ticker: str, direction: str, entry_price: float) -> dict:
+    """
+    v0.5.19 重写:
+    候选目标价(多头): 近20价格最高点 / 最近$5整数关口 / entry+ATR×2.0
+    候选目标价(空头): 近20价格最低点 / 最近$5整数关口 / entry-ATR×2.0
+    → 按距离 entry 由近到远排序,最近=T1,次近=T2
+    止损: entry ± ATR×1.5
+    ATR 由最近20个价格点的标准差×1.5估算,最小 0.3% 兜底
+    """
+    result = {
+        "t1": None, "t1_label": "",
+        "t2": None, "t2_label": "",
+        "stop": None, "atr": None,
+        # 保留旧字段供 format_order_text 兼容
+        "tech_target": None, "tech_stop": None,
+        "stat_target": None, "stat_stop": None,
+        "stat_samples": 0, "conflict": False,
+    }
+
+    if not entry_price or entry_price <= 0:
+        return result
+
+    try:
+        import math, statistics
+        prices_ts = session.prices.get(ticker, []) if session else []
+        if len(prices_ts) < 5:
+            return result
+
+        recent60 = [p for _, p in prices_ts[-60:]]
+        recent20 = [p for _, p in prices_ts[-20:]] if len(prices_ts) >= 20 else recent60
+
+        # ATR 估算
+        sample = recent20 if len(recent20) >= 5 else recent60
+        std = statistics.stdev(sample) if len(sample) >= 2 else 0
+        atr = max(std * 1.5, entry_price * 0.003)
+        result["atr"] = round(atr, 4)
+
+        if direction == "long":
+            recent_extreme = max(recent20)
+            # 最近$5关口 (entry 上方)
+            round5 = math.ceil(entry_price / 5) * 5
+            if round5 <= entry_price:
+                round5 += 5
+            candidates = [
+                (round(recent_extreme, 2), "近期高点"),
+                (round(float(round5), 2),  "整数关口"),
+                (round(entry_price + atr * 2.0, 2), "ATR×2.0"),
+            ]
+            result["stop"] = round(entry_price - atr * 1.5, 2)
+            # 只取高于 entry 的候选
+            above = [(p, l) for p, l in candidates if p > entry_price]
+        else:
+            recent_extreme = min(recent20)
+            round5 = math.floor(entry_price / 5) * 5
+            if round5 >= entry_price:
+                round5 -= 5
+            candidates = [
+                (round(recent_extreme, 2), "近期低点"),
+                (round(float(round5), 2),  "整数关口"),
+                (round(entry_price - atr * 2.0, 2), "ATR×2.0"),
+            ]
+            result["stop"] = round(entry_price + atr * 1.5, 2)
+            above = [(p, l) for p, l in candidates if p < entry_price]
+
+        # 按距离 entry 由近到远排序，去重（间距 < 0.5%视为同一价位）
+        above.sort(key=lambda x: abs(x[0] - entry_price))
+        deduped = []
+        for p, l in above:
+            if not deduped or abs(p - deduped[-1][0]) > entry_price * 0.005:
+                deduped.append((p, l))
+
+        if deduped:
+            result["t1"], result["t1_label"] = deduped[0]
+            result["tech_target"] = deduped[0][0]
+            result["tech_stop"]   = result["stop"]
+        if len(deduped) >= 2:
+            result["t2"], result["t2_label"] = deduped[1]
+
+    except Exception as e:
+        print(f"  [pusher] target calc error: {e}")
+
+    return result
+
+
+def _fmt_price_targets(targets: dict, direction: str, entry_price: float) -> str:
+    """
+    v0.5.19: T1/T2/止损 三行格式 + 盈亏比
+    """
+    if not targets:
+        return ""
+    t1 = targets.get("t1")
+    t2 = targets.get("t2")
+    stop = targets.get("stop")
+    if not (t1 or stop):
+        return ""
+
+    lines = ["📐 <b>目标价</b>"]
+    if t1:
+        t1_pct = (t1 - entry_price) / entry_price * 100
+        lbl = targets.get("t1_label", "")
+        lines.append(f"   T1 {_money(t1)}  ({t1_pct:+.1f}%)  [{lbl}]")
+    if t2:
+        t2_pct = (t2 - entry_price) / entry_price * 100
+        lbl = targets.get("t2_label", "")
+        lines.append(f"   T2 {_money(t2)}  ({t2_pct:+.1f}%)  [{lbl}]")
+    if stop:
+        stop_pct = (stop - entry_price) / entry_price * 100
+        lines.append(f"   止损 {_money(stop)}  ({stop_pct:+.1f}%)  [ATR×1.5]")
+        if t1 and entry_price:
+            reward = abs(t1 - entry_price)
+            risk   = abs(entry_price - stop)
+            if risk > 0:
+                lines.append(f"   盈亏比 {reward/risk:.1f}:1")
+    return "\n".join(lines)
+
+
 # ── 通用:带仓位冲突分析的信号推送 ──────────────────────────
 def _fmt_signal_with_conflict(hit, session, signal_direction, title_line, tech_line):
     master_short = hit["ticker"].replace("US.", "")
     strength     = hit.get("strength", "WEAK")
+    entry_price  = session.get_last_price(hit["ticker"]) if session else None
 
-    # v0.5.12: 信心指数
+    # v0.5.19: 信号强度进度条
     conf = _confidence_score(hit)
     conf_emoji = _confidence_emoji(conf)
-    conf_line = f"{conf_emoji} 信心指数 <b>{conf}%</b>"
+    conf_line = f"{conf_emoji} 信心: {_strength_bar(conf)}"
 
-    lines = [title_line, "━━━━━━━━━━━━━━", conf_line]
+    # v0.5.20: 行情类型 + 方向偏向
+    regime = _market_regime_label(hit)
+    bias_word = "偏多" if signal_direction == "long" else "偏空" if signal_direction == "short" else "偏观望"
+    intent    = _action_intent_label(conf, signal_direction)
+    target_etf = pick_target_follower(session, signal_direction) if session else None
+    etf_hint   = target_etf.replace("US.", "") if target_etf else ""
+    etf_part   = f"，适合{'做多' if signal_direction == 'long' else '做空'} {etf_hint}" if etf_hint else ""
+    regime_line    = f"行情: {regime}"
+    direction_line = f"方向: {bias_word}{etf_part}  ·  {intent}"
+
+    lines = [title_line, "━━━━━━━━━━━━━━", conf_line, regime_line, direction_line]
     lines += _trio_block(session)
     if tech_line:
         lines.append(tech_line)
 
+    # v0.5.19: 新版目标价 T1/T2/止损
+    targets = {}
+    if entry_price:
+        targets = _calc_price_targets(session, hit["ticker"], signal_direction, entry_price)
+
     conflict = analyze_position_conflict(session, signal_direction)
-    action   = _build_action_plan(session, signal_direction, strength, conflict)
+    action   = _build_action_plan(session, signal_direction, strength, conflict,
+                                  conf=conf, targets=targets)
 
     lines.append("")
     lines += action["lines"]
+    lines += ["", "这是方向参考，不是下单指令。"]
 
     _cache_all(action["caches"], {"source": title_line, "direction": signal_direction})
 
@@ -987,7 +1303,8 @@ def format_order_text(etf_short):
     if not plan:
         return None
 
-    action = plan.get("action", "BUY")
+    action_code = plan.get("action", "BUY")
+    action_label = "买入参考" if action_code == "BUY" else "卖出参考"
     qty    = plan.get("qty", 0)
     price  = plan.get("price", plan.get("entry", 0))
     target = plan.get("target")
@@ -995,7 +1312,7 @@ def format_order_text(etf_short):
     reason = plan.get("reason") or (plan.get("signal", {}) or {}).get("source", "")
 
     lines = [
-        f"📋 <b>{etf_short} {action} 下单</b>",
+        f"📋 <b>{etf_short} {action_label}</b>",
         f"━━━━━━━━━━━━━━",
         f"{etf_short}  {qty} 股  限价 {_money(price)}",
     ]
