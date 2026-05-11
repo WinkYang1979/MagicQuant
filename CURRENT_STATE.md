@@ -14,7 +14,7 @@
 | context.py | core/focus/ | v0.5.2 | ✅ 已部署 |
 | swing_detector.py | core/focus/ | v0.5.21 | ✅ 已部署 |
 | **pusher.py** | core/focus/ | **v0.5.20** 🆕 | ⏳ 待部署 |
-| focus_manager.py | core/focus/ | v0.5.20 | ✅ 已部署 |
+| **focus_manager.py** | core/focus/ | **v0.5.21** 🆕 | ⏳ 待部署 |
 | market_clock.py | core/focus/ | v0.2.0 | ✅ 已部署 |
 | event_calendar.py | core/focus/ | v0.1.0 | ✅ 已部署 |
 | activity_profile.py | core/focus/ | v0.1.0 | ✅ 已部署 |
@@ -23,8 +23,9 @@
 | bot_controller.py | bot/ | v0.5.13 | ✅ 已部署 |
 | **signal_engine.py** | core/ | **v0.1.0 [LEGACY]** 🆕 | ⏳ 待部署 |
 
-**⏳ 待部署的 2 个文件**:
+**⏳ 待部署的 3 个文件**:
 - `core/focus/pusher.py`
+- `core/focus/focus_manager.py`
 - `core/signal_engine.py`
 
 **GitHub**: https://github.com/WinkYang1979/MagicQuant
@@ -36,8 +37,7 @@
 | 项 | 值 |
 |---|---|
 | **USD 可用现金** | **$2,308.68** (盘后归档值) |
-| **PDT 状态** | **受限** ⚠️ (USD < $25k) |
-| **PDT 新规** | 🔔 **2026-06-04 生效**:$25k 门槛降至 ~$2k |
+| **PDT 状态** | **无限制** ✅ (Moomoo AU 账户不受 PDT 规则约束) |
 | 券商 | Moomoo AU 综合账户 6018 |
 
 ### ⚠️ HKD 聚合陷阱
@@ -198,5 +198,6 @@ data/review/YYYY-MM-DD/
 | 2026-05-06~09 | swing v0.5.17-v0.5.21:多空过滤升级 + 风险提醒触发器 |
 | 2026-05-09 | focus_manager v0.5.20:趋势锁定机制上线 |
 | 2026-05-11 | pusher v0.5.19:T1/T2/止损目标价 + 信心进度条 + 仓位分级 |
-| **2026-05-11** | **pusher v0.5.20:副驾驶语言规范 — 去强制指令 + 免责声明 + 行情/方向标签** |
+| 2026-05-11 | pusher v0.5.20:副驾驶语言规范 — 去强制指令 + 免责声明 + 行情/方向标签 |
+| **2026-05-11** | **focus_manager v0.5.21:共享市场快照输出 data/shared/market_snapshot.json** |
 | 下次变更 | review_analyzer.py 或 core/strategy/ 架构 |

@@ -1,9 +1,63 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — focus_manager.py
-  VERSION : v0.5.16
-  DATE    : 2026-04-28
+  VERSION : v0.5.21
+  DATE    : 2026-05-11
   CHANGES :
+    v0.5.21 (2026-05-11):
+      - [NEW] 共享市场快照输出: _write_shared_market_snapshot()
+              每轮主循环按市场时段节流写入 data/shared/market_snapshot.json
+              先写 .tmp 再原子替换(os.replace),防止读到半截 JSON
+              包含 quotes / account / positions / indicators / last_signal / focus 状态
+              写失败只打 warning,不影响盯盘主循环
+      - [NEW] _snapshot_throttle_sec(): PEAK=5s/HIGH=10s/MEDIUM=15s/LOW=30s/CLOSED=60s
+      - [NEW] _build_last_signal(): hit dict → last_signal schema 字段
+    v0.5.20 (2026-05-09):
+      - [NEW] 趋势锁定机制 (TrendLock):
+              direction_trend STRONG 同向连续 3 次 → 锁定
+              锁定推送"趋势锁定"消息: 方向/日内涨幅/目标价
+              目标价: 整十关口 + ATR×1.5/2.0/3.0 三档
+              日内涨幅从峰值回落 >3% → 解锁推送解除消息
+              锁定期间:
+                trend_lock=long  → swing_top + direction_trend short 静默
+                trend_lock=short → swing_bottom + direction_trend long  静默
+              helper: _calc_atr / _calc_trend_targets /
+                      _fmt_trend_lock_msg / _fmt_trend_unlock_msg
+    v0.5.19 (2026-05-09):
+      - [FIX] K 线冻结第三次根治：
+              根因 D: vol_sum 冻结检测有误报——两次轮询落在同一根 5m 柱内时
+                      vol_sum 天然不变，误触重订阅，若重订阅失败则陷入死循环
+              根因 E: 重订阅只清 _kl_subscribed 但不重建 _quote_ctx，
+                      TCP 层推送流静默冻结时重订阅同一连接完全无效
+              修复 D: 用 last_bar_time_key 取代 vol_sum 做冻结判断；
+                      仅当 "最后一根柱的 time_key 连续 3 次不变
+                      且市场处于交易时段" 才判定为冻结（消除误报）
+              修复 E: 冻结确认后调用 client.reconnect_quote() 强制重建
+                      OpenQuoteContext，而不仅仅是重订阅
+              新增 F: 尝试注册 RealTimeKlineHandlerBase push 回调；
+                      回调触发时更新 _kl_push_ts，用于辅助活跃检测；
+                      SDK 不支持时静默降级，不影响轮询
+              新增 G: _fetch_5m_kline 每次成功必打印诊断行：
+                      bars/last_time_key/last_vol，便于日志追溯冻结起点
+    v0.5.18 (2026-05-08):
+      - [FIX] VWAP 跨日污染: _fetch_5m_kline 增加 ET 日期过滤
+              根因: get_cur_kline(num=30) 取最近 30 根 K 线不区分日期,
+                    重启时 kline_cache 横跨昨天+今天, VWAP 混入昨日数据
+              修复: num 从 30→200 (覆盖完整交易日), 按 time_key 的 ET 日期
+                    过滤只保留今天; 若今日无数据则回退全量(盘前兜底)
+    v0.5.17 (2026-05-08):
+      - [FIX] kline_cache 冻结根治:
+              根因 A: subscribe_push=False → get_cur_kline 只拿订阅瞬间快照,
+                      Futu Gateway 不再推新 K 线, RSI/VWAP/量比 10 分钟不变
+              根因 B: _kl_subscribed 是 set, 只订阅一次永不刷新,
+                      连接重置后订阅流已死但不重连
+              修复 A: subscribe_push=False → subscribe_push=True
+                      让 Futu Gateway 持续推 5M K 线实时更新
+              修复 B: _kl_subscribed 改为 dict{(ticker,type): last_sub_ts},
+                      每 KLINE_RESUB_INTERVAL(25 min) 强制重订阅
+              修复 C: _focus_loop 增加 volume 冻结检测
+                      连续 4 次(≈2 min) vol_sum 不变 → 判定订阅流已死
+                      → 清掉订阅时间戳, 下次 fetch 强制重订阅 + 打印告警
     v0.5.16 (2026-04-28):
       - [FIX] kline freeze: _fetch_5m_kline 返回 None 时不再覆盖 kline_cache
               原问题: fetch 失败 → kline_cache=None → indicators_cache 不更新
@@ -94,6 +148,17 @@ try:
 except ImportError:
     from futu import KLType, AuType, SubType
 
+# v0.5.19: 尝试导入推送回调基类；SDK 不支持时降级为轮询
+_HAS_KLINE_HANDLER = False
+try:
+    try:
+        from moomoo import RealTimeKlineHandlerBase as _KLHandlerBase
+    except ImportError:
+        from futu import RealTimeKlineHandlerBase as _KLHandlerBase
+    _HAS_KLINE_HANDLER = True
+except ImportError:
+    _KLHandlerBase = object   # 哑占位，让 class 定义不报错
+
 from core.realtime_quote import get_client as get_quote_client
 
 from .context import FocusSession
@@ -101,6 +166,7 @@ from .micro_indicators import calc_all_micro
 from .swing_detector import run_all_triggers, diagnose_distance, DEFAULT_PARAMS as SWING_DEFAULT_PARAMS
 from .pusher import format_trigger_message
 from .market_clock import (
+    ET,
     get_market_status,
     is_market_open,
     format_market_status,
@@ -116,8 +182,8 @@ from .proactive_reminder import check_and_fire_reminders
 from .event_calendar import format_event_line
 
 
-FOCUS_MGR_VERSION = "v0.5.16"
-FOCUS_MGR_DATE    = "2026-04-28"
+FOCUS_MGR_VERSION = "v0.5.21"
+FOCUS_MGR_DATE    = "2026-05-11"
 
 # ── 全局单例 ─────────────────────────────────────────────
 _current_session: Optional[FocusSession] = None
@@ -136,6 +202,7 @@ POLL_INTERVAL_EXTENDED  = 10
 POLL_INTERVAL_CLOSED    = 60
 
 KLINE_FETCH_INTERVAL    = 30
+KLINE_RESUB_INTERVAL    = 25 * 60   # 每 25 min 强制重订阅 K_5M，防止推送流静默老化
 POSITION_FETCH_INTERVAL = 15
 CASH_FETCH_INTERVAL     = 30
 HEARTBEAT_INTERVAL      = 600
@@ -429,7 +496,42 @@ def _build_heartbeat(session: FocusSession, indicators: dict) -> str:
 #  v0.5.10 复盘数据归档(每天收盘后触发一次)
 # ══════════════════════════════════════════════════════════════════
 _kline_archive_done_date = None   # 避免同一天重复归档
-_kl_subscribed: set = set()       # 已订阅的 (ticker, subtype) 组合，避免重复 subscribe
+_kl_subscribed: dict = {}         # {(ticker, subtype): last_subscribed_ts}，定期强制刷新
+_snapshot_last_write: float = 0.0  # v0.5.21 共享快照节流时间戳
+
+# v0.5.19: push 回调时间戳 —— 每次 SDK 推送 K 线时更新，用于冻结检测
+_kl_push_ts: dict = {}           # {ticker: last_push_epoch}
+_kl_push_lock = threading.Lock()
+
+
+class _KLinePushHandler(_KLHandlerBase):
+    """
+    v0.5.19: 注册到 OpenQuoteContext 的 K 线推送回调。
+    SDK 每次推送 K 线更新时自动调用 on_recv_rsp。
+    只更新时间戳用于冻结检测；实际 kline_cache 仍由轮询写入，
+    避免复杂的跨线程 DataFrame 合并。
+    若 SDK 不支持 RealTimeKlineHandlerBase，此类退化为空对象。
+    """
+    def on_recv_rsp(self, rsp_pb):
+        if not _HAS_KLINE_HANDLER:
+            return
+        try:
+            ret, df = super().on_recv_rsp(rsp_pb)
+            if ret == 0 and df is not None:
+                # 从 DataFrame 中提取 ticker（列名因版本而异）
+                import pandas as pd
+                if isinstance(df, pd.DataFrame) and len(df) > 0:
+                    for col in ("code", "stock_code", "ticker"):
+                        if col in df.columns:
+                            ticker = str(df[col].iloc[0])
+                            if not ticker.startswith("US."):
+                                ticker = "US." + ticker
+                            with _kl_push_lock:
+                                _kl_push_ts[ticker] = time.time()
+                            break
+            return ret, df
+        except Exception:
+            pass
 
 def _archive_daily_klines(session, client):
     """
@@ -527,6 +629,283 @@ def _archive_daily_klines(session, client):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  v0.5.20 趋势锁定 — 工具函数
+# ══════════════════════════════════════════════════════════════════
+
+def _calc_atr(kline_cache, period: int = 14) -> float:
+    """简单 ATR：最近 period 根 5m 柱的 (high-low) 均值。"""
+    try:
+        if kline_cache is None or len(kline_cache) < period:
+            return 0.0
+        import pandas as pd
+        recent = kline_cache.tail(period)
+        tr = (recent["high"] - recent["low"]).abs()
+        return float(tr.mean())
+    except Exception:
+        return 0.0
+
+
+def _calc_trend_targets(price: float, atr: float, direction: str) -> dict:
+    """
+    趋势锁定目标价：
+    - 整十关口（long 取上方最近整十，short 取下方最近整十）
+    - ATR × 1.5 / 2.0 / 3.0
+    """
+    import math
+    sign = 1 if direction == "long" else -1
+    if direction == "long":
+        round_ten = math.ceil(price / 10) * 10
+        if round_ten == price:          # 恰好在整十位则取上一级
+            round_ten += 10
+    else:
+        round_ten = math.floor(price / 10) * 10
+        if round_ten == price:
+            round_ten -= 10
+
+    return {
+        "round_ten": round(round_ten, 2),
+        "atr_1_5":   round(price + sign * atr * 1.5, 2) if atr else None,
+        "atr_2_0":   round(price + sign * atr * 2.0, 2) if atr else None,
+        "atr_3_0":   round(price + sign * atr * 3.0, 2) if atr else None,
+    }
+
+
+def _fmt_trend_lock_msg(ticker_short: str, direction: str,
+                        day_chg: float, price: float, targets: dict) -> str:
+    emoji = "🚀" if direction == "long" else "📉"
+    word  = "看多" if direction == "long" else "看空"
+    chg_sign = "+" if day_chg >= 0 else ""
+    suppress = ("swing_top + direction_trend 看空"
+                if direction == "long"
+                else "swing_bottom + direction_trend 看多")
+    lines = [
+        f"🔒 <b>趋势锁定 · {ticker_short} {emoji}{word}</b>",
+        f"━━━━━━━━━━━━━━",
+        f"连续 3 次 STRONG {word}  日内 {chg_sign}{day_chg:.2f}%  现价 ${price:.2f}",
+        f"🔕 锁定期间静默: {suppress}",
+        f"🔓 解锁条件: 日内涨幅从峰值回落 >3%",
+        f"",
+        f"📐 <b>目标价参考</b>",
+        f"🔢 整十关口: ${targets['round_ten']:.2f}",
+    ]
+    if targets.get("atr_1_5") is not None:
+        lines += [
+            f"📊 ATR×1.5: ${targets['atr_1_5']:.2f}",
+            f"📊 ATR×2.0: ${targets['atr_2_0']:.2f}",
+            f"📊 ATR×3.0: ${targets['atr_3_0']:.2f}",
+        ]
+    else:
+        lines.append("📊 ATR: K 线数据不足，暂无计算")
+    return "\n".join(lines)
+
+
+def _fmt_trend_unlock_msg(ticker_short: str, direction: str,
+                          peak_chg: float, cur_chg: float, duration_min: int) -> str:
+    word = "看多" if direction == "long" else "看空"
+    drawdown = peak_chg - cur_chg if direction == "long" else cur_chg - peak_chg
+    peak_sign = "+" if peak_chg >= 0 else ""
+    cur_sign  = "+" if cur_chg  >= 0 else ""
+    return (
+        f"🔓 <b>趋势锁定解除 · {ticker_short} {word}</b>\n"
+        f"日内涨幅从 {peak_sign}{peak_chg:.2f}% 回落至 {cur_sign}{cur_chg:.2f}%"
+        f"（回撤 {drawdown:.2f}%）\n"
+        f"锁定持续 {duration_min} 分钟"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════
+#  v0.5.21 共享市场快照
+# ══════════════════════════════════════════════════════════════════
+
+def _snapshot_throttle_sec(profile: dict, market_status: str) -> int:
+    """按行情密度等级决定快照写入最小间隔（秒）"""
+    level = (profile.get("level") or "").upper()
+    if "PEAK" in level:
+        return 5
+    if "HIGH" in level:
+        return 10
+    if "MEDIUM" in level:
+        return 15
+    if market_status == "closed":
+        return 60
+    return 30  # LOW / MINIMAL / unknown
+
+
+def _build_last_signal(hit: dict) -> dict:
+    """hit dict → last_signal 快照字段"""
+    trigger   = hit.get("trigger", "")
+    direction = hit.get("direction", "")
+    strength  = hit.get("strength", "WEAK")
+
+    bias = {"long": "bullish", "short": "bearish"}.get(direction, "neutral")
+
+    RISK_TRIGGERS  = {"near_resistance", "near_support", "overbought_surge",
+                      "large_day_gain", "profit_target_hit", "drawdown_from_peak"}
+    ENTRY_TRIGGERS = {"direction_trend", "swing_top", "swing_bottom"}
+    is_risk  = trigger in RISK_TRIGGERS
+    is_entry = trigger in ENTRY_TRIGGERS
+
+    confidence = 75 if strength == "STRONG" else 55
+
+    if is_risk:
+        intent = ("reduce_risk"
+                  if trigger in ("overbought_surge", "large_day_gain",
+                                 "near_resistance", "profit_target_hit")
+                  else "watch_breakout")
+    elif strength == "STRONG" and is_entry:
+        intent = "light_long" if direction == "long" else "light_short"
+    elif strength == "WEAK" and is_entry:
+        intent = "watch_pullback" if direction == "long" else "watch_breakout"
+    else:
+        intent = "wait"
+
+    return {
+        "trigger":         trigger,
+        "direction":       direction,
+        "strength":        strength,
+        "confidence":      confidence,
+        "bias":            bias,
+        "action_intent":   intent,
+        "is_trade_entry":  is_entry,
+        "is_risk_warning": is_risk,
+        "ts":              datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def _write_shared_market_snapshot(session, indicators_cache: dict, profile: dict,
+                                   market_status: str, last_signal: dict = None,
+                                   trend_lock_dir=None, trend_lock_ts: float = 0.0):
+    """
+    v0.5.21: 写入共享市场快照 data/shared/market_snapshot.json
+    供其他系统读取，只读输出，不下单。
+    先写 .tmp 再 os.replace() 原子替换，防止读到半截 JSON。
+    写失败只打 warning，不影响盯盘主循环。
+    """
+    global _snapshot_last_write
+    import json, os
+
+    now_ts   = time.time()
+    interval = _snapshot_throttle_sec(profile, market_status)
+    if now_ts - _snapshot_last_write < interval:
+        return
+
+    try:
+        base_dir  = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        share_dir = os.path.join(base_dir, "data", "shared")
+        os.makedirs(share_dir, exist_ok=True)
+        out_path  = os.path.join(share_dir, "market_snapshot.json")
+        tmp_path  = os.path.join(share_dir, "market_snapshot.tmp")
+
+        # ── quotes ──────────────────────────────────────────────
+        quotes = {}
+        for tk in [session.master] + list(session.followers or []):
+            q = session.quote_snapshot.get(tk) or {}
+            quotes[tk] = {
+                "price":       session.get_last_price(tk),
+                "change":      q.get("change"),
+                "change_pct":  q.get("change_pct") or session.get_day_change_pct(tk),
+                "high":        session.session_high.get(tk),
+                "low":         session.session_low.get(tk),
+                "volume":      q.get("volume"),
+                "update_time": session.get_quote_update_time(tk) or "",
+            }
+
+        # ── positions (qty > 0 only) ─────────────────────────────
+        positions = {}
+        for tk in [session.master] + list(session.followers or []):
+            pos = session.get_position(tk)
+            if pos and pos.get("qty", 0) > 0:
+                positions[tk] = {
+                    "qty":           pos.get("qty"),
+                    "cost_price":    pos.get("cost_price"),
+                    "current_price": session.get_last_price(tk),
+                    "market_val":    pos.get("market_val"),
+                    "pl_val":        pos.get("pl_val"),
+                    "pl_pct":        pos.get("pl_pct"),
+                }
+
+        # ── indicators ──────────────────────────────────────────
+        ind = indicators_cache or {}
+        indicators = {
+            "rsi_5m":       ind.get("rsi_5m"),
+            "vwap":         ind.get("vwap"),
+            "vol_ratio":    ind.get("vol_ratio"),
+            "session_high": ind.get("session_high"),
+            "session_low":  ind.get("session_low"),
+            "dist_high":    ind.get("dist_high"),
+            "dist_low":     ind.get("dist_low"),
+            "data_ok":      bool(ind.get("data_ok")),
+        }
+
+        # ── account ─────────────────────────────────────────────
+        fetched_at_str = (datetime.fromtimestamp(session.cash_fetched_at)
+                          .strftime("%Y-%m-%d %H:%M:%S")
+                          if session.cash_fetched_at else "")
+        account = {
+            "cash":         session.cash_available,
+            "power":        session.cash_power,
+            "total_assets": None,
+            "market_val":   None,
+            "currency":     "USD",
+            "fetched_at":   fetched_at_str,
+        }
+
+        # ── focus state ─────────────────────────────────────────
+        focus = {
+            "loop_count":           session.loop_count,
+            "push_count":           session.push_count,
+            "error_count":          session.error_count,
+            "trend_lock":           trend_lock_dir is not None,
+            "trend_lock_direction": trend_lock_dir,
+            "trend_lock_since":     (datetime.fromtimestamp(trend_lock_ts)
+                                     .strftime("%Y-%m-%d %H:%M:%S")
+                                     if trend_lock_ts else None),
+            "heartbeat_enabled":    _heartbeat_enabled,
+        }
+
+        snapshot = {
+            "schema_version":   "1.1",
+            "source":           "claude_focus",
+            "updated_at":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "market_status":    market_status,
+            "activity_profile": {
+                "level":    profile.get("level", ""),
+                "poll_sec": profile.get("poll_sec"),
+                "scale":    profile.get("scale"),
+                "reason":   profile.get("reason", ""),
+            },
+            "master":     session.master,
+            "followers":  list(session.followers or []),
+            "quotes":     quotes,
+            "account":    account,
+            "positions":  positions,
+            "indicators": indicators,
+            "last_signal": last_signal or {},
+            "focus":      focus,
+            "producer": {
+                "system":  "claude",
+                "module":  "focus_manager",
+                "version": FOCUS_MGR_VERSION,
+            },
+            "notes": [
+                "This file is read-only for other systems.",
+                "No order placement is performed by this export.",
+                "If updated_at is older than 120s during CLOSED session, "
+                "or 15s during active session, consider fallback to direct Futu query.",
+            ],
+        }
+
+        payload = json.dumps(snapshot, ensure_ascii=False, indent=2, default=str)
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(payload)
+        os.replace(tmp_path, out_path)
+        _snapshot_last_write = now_ts
+
+    except Exception as e:
+        print(f"  [snapshot] ⚠️ write failed: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════
 #  主循环
 # ══════════════════════════════════════════════════════════════════
 def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threading.Event):
@@ -542,6 +921,17 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
     first_indicators_sent = False
     last_market_status    = None
     last_trend_fire: dict = {}        # {"long": float, "short": float} 方向互斥时间戳
+    last_bar_time_key     = None      # v0.5.19 冻结检测：上次最后一根柱的 time_key
+    kline_freeze_count    = 0         # v0.5.19 冻结检测：连续 time_key 未变次数
+
+    # v0.5.20 趋势锁定状态
+    trend_lock_dir        = None      # "long" / "short" / None
+    trend_lock_ts         = 0.0       # 锁定时刻 (epoch)
+    trend_lock_peak_chg   = 0.0       # 锁定后日内涨幅峰值（动态更新）
+    strong_count: dict    = {"long": 0, "short": 0}  # 同向 STRONG 连续次数
+
+    # v0.5.21 共享快照：跨迭代保留最后一次推送信号
+    snapshot_last_signal: dict = {}
 
     # ── v0.5.6 关键:读 manual_mode ──
     manual_mode = getattr(session, "manual_mode", False)
@@ -590,6 +980,28 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
                 fetched = _fetch_5m_kline(client, session.master)
                 if fetched is not None:
                     kline_cache = fetched          # 只有成功才覆盖
+
+                    # v0.5.19 冻结检测：比较最后一根柱的 time_key（取代 vol_sum）
+                    # vol_sum 误报原因：两次轮询落在同一根 5m 柱内时 vol_sum 天然不变
+                    cur_bar_tk = (str(fetched["time_key"].iloc[-1])
+                                  if "time_key" in fetched.columns else None)
+
+                    if cur_bar_tk and cur_bar_tk == last_bar_time_key:
+                        kline_freeze_count += 1
+                        # 仅在交易时段（pre/regular/post/overnight）才判定为冻结
+                        # closed 状态下 time_key 不变是正常的
+                        trading_now = (get_market_status() != "closed")
+                        if trading_now and kline_freeze_count >= 3:   # 3×30s = 90s
+                            print(f"  [focus] ⚠️ kline frozen {kline_freeze_count}x "
+                                  f"(last_bar={cur_bar_tk} unchanged) "
+                                  f"— hard reconnecting quote context")
+                            # 清空订阅缓存，强制重建连接（不只是重订阅）
+                            _kl_subscribed.clear()
+                            client.reconnect_quote()
+                            kline_freeze_count = 0
+                    else:
+                        kline_freeze_count = 0
+                        last_bar_time_key = cur_bar_tk
                 else:
                     print("  [focus] kline fetch returned None, retaining last cache")
                 last_kline_fetch = now
@@ -629,28 +1041,114 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
                 params=scaled_params,
             )
 
-            # ── 方向互斥过滤：direction_trend 触发后 15 min 内压制反向 swing ──
-            DIRECTION_MUTEX_SEC = 15 * 60
+            # ── v0.5.20 趋势锁定：解锁检测（每轮执行，不依赖 hits）──
+            if trend_lock_dir:
+                cur_day_chg = (session.get_day_change_pct(session.master)
+                               if hasattr(session, "get_day_change_pct") else None)
+                if cur_day_chg is not None:
+                    # 更新峰值
+                    if trend_lock_dir == "long":
+                        trend_lock_peak_chg = max(trend_lock_peak_chg, cur_day_chg)
+                        drawdown = trend_lock_peak_chg - cur_day_chg
+                    else:
+                        trend_lock_peak_chg = min(trend_lock_peak_chg, cur_day_chg)
+                        drawdown = cur_day_chg - trend_lock_peak_chg
+                    # 回落 >3% → 解锁
+                    if drawdown >= 3.0:
+                        dur_min = int((now - trend_lock_ts) / 60)
+                        ticker_s = session.master.replace("US.", "")
+                        unlock_msg = _fmt_trend_unlock_msg(
+                            ticker_s, trend_lock_dir,
+                            trend_lock_peak_chg, cur_day_chg, dur_min
+                        )
+                        print(f"  [focus] 🔓 trend_lock {trend_lock_dir} released "
+                              f"(drawdown={drawdown:.2f}% after {dur_min}min)")
+                        try:
+                            send_tg_fn(unlock_msg)
+                        except Exception:
+                            pass
+                        trend_lock_dir      = None
+                        trend_lock_ts       = 0.0
+                        trend_lock_peak_chg = 0.0
+                        strong_count        = {"long": 0, "short": 0}
+
+            # ── 方向互斥过滤：direction_trend 触发后压制反向 swing ──
+            # WEAK  看多/空 → 15 min 内压制反向 swing
+            # STRONG 看多   → 30 min 内压制 swing_top 看空（用户要求：强趋势不逆势）
+            DIRECTION_MUTEX_SEC        = 15 * 60   # WEAK 互斥窗口
+            DIRECTION_MUTEX_STRONG_SEC = 30 * 60   # STRONG 互斥窗口
+            TREND_LOCK_COUNT           = 3          # 触发锁定所需同向 STRONG 次数
             filtered_hits = []
             for hit in hits:
                 trig = hit.get("trigger")
                 dirn = hit.get("direction")
 
+                # ── v0.5.20 趋势锁定压制：锁定期间静默反向信号 ──────────────
+                if trend_lock_dir == "long":
+                    if trig == "swing_top" and dirn == "short":
+                        print(f"  [focus] swing_top suppressed: trend_lock=long active")
+                        continue
+                    if trig == "direction_trend" and dirn == "short":
+                        print(f"  [focus] direction_trend short suppressed: trend_lock=long active")
+                        continue
+                elif trend_lock_dir == "short":
+                    if trig == "swing_bottom" and dirn == "long":
+                        print(f"  [focus] swing_bottom suppressed: trend_lock=short active")
+                        continue
+                    if trig == "direction_trend" and dirn == "long":
+                        print(f"  [focus] direction_trend long suppressed: trend_lock=short active")
+                        continue
+
+                # ── direction_trend：方向互斥记录 + 趋势锁定计数 ─────────────
                 if trig == "direction_trend":
-                    last_trend_fire[dirn] = now      # 记录触发时刻
+                    last_trend_fire[dirn] = now           # 任意强度都记录
+                    if hit.get("strength") == "STRONG":
+                        last_trend_fire[dirn + "_strong"] = now   # STRONG 单独记录
+                        # v0.5.20: 同向 STRONG 计数，反向重置
+                        opp = "short" if dirn == "long" else "long"
+                        strong_count[dirn] = strong_count.get(dirn, 0) + 1
+                        strong_count[opp]  = 0
+                        # 连续 3 次 → 触发锁定
+                        if strong_count[dirn] >= TREND_LOCK_COUNT and trend_lock_dir != dirn:
+                            cur_day_chg = (session.get_day_change_pct(session.master)
+                                           if hasattr(session, "get_day_change_pct") else 0.0) or 0.0
+                            cur_price   = session.get_last_price(session.master) or 0.0
+                            atr         = _calc_atr(kline_cache)
+                            targets     = _calc_trend_targets(cur_price, atr, dirn)
+                            trend_lock_dir      = dirn
+                            trend_lock_ts       = now
+                            trend_lock_peak_chg = cur_day_chg
+                            ticker_s = session.master.replace("US.", "")
+                            lock_msg = _fmt_trend_lock_msg(
+                                ticker_s, dirn, cur_day_chg, cur_price, targets
+                            )
+                            print(f"  [focus] 🔒 trend_lock={dirn} activated "
+                                  f"(STRONG×{strong_count[dirn]}, day_chg={cur_day_chg:+.2f}%)")
+                            try:
+                                send_tg_fn(lock_msg)
+                            except Exception:
+                                pass
+                    else:
+                        # WEAK signal 重置计数（趋势不够强则从头累积）
+                        strong_count[dirn] = 0
                     filtered_hits.append(hit)
 
                 elif trig == "swing_top" and dirn == "short":
-                    # direction_trend 看多 15 min 内 → 压制 swing_top 看空
-                    elapsed = now - last_trend_fire.get("long", 0)
-                    if elapsed < DIRECTION_MUTEX_SEC:
+                    # direction_trend STRONG 看多 30 min 内 → 压制
+                    strong_elapsed = now - last_trend_fire.get("long_strong", 0)
+                    any_elapsed    = now - last_trend_fire.get("long", 0)
+                    if strong_elapsed < DIRECTION_MUTEX_STRONG_SEC:
                         print(f"  [focus] swing_top suppressed: "
-                              f"direction_trend long fired {int(elapsed)}s ago")
+                              f"direction_trend STRONG long fired {int(strong_elapsed)}s ago")
+                        continue
+                    elif any_elapsed < DIRECTION_MUTEX_SEC:
+                        print(f"  [focus] swing_top suppressed: "
+                              f"direction_trend long fired {int(any_elapsed)}s ago")
                         continue
                     filtered_hits.append(hit)
 
                 elif trig == "swing_bottom" and dirn == "long":
-                    # direction_trend 看空 15 min 内 → 压制 swing_bottom 看多
+                    # direction_trend 看空 15 min 内 → 压制 swing_bottom 看多（不变）
                     elapsed = now - last_trend_fire.get("short", 0)
                     if elapsed < DIRECTION_MUTEX_SEC:
                         print(f"  [focus] swing_bottom suppressed: "
@@ -667,6 +1165,7 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
                     if send_tg_fn:
                         send_tg_fn(msg["text"], buttons=msg.get("buttons"))
                         session.push_count += 1
+                        snapshot_last_signal = _build_last_signal(hit)  # v0.5.21
                 except Exception as e:
                     print(f"  [focus] push error: {e}")
                     session.error_count += 1
@@ -696,6 +1195,17 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
                     last_heartbeat = now
                 except Exception as e:
                     print(f"  [focus] heartbeat error: {e}")
+
+            # v0.5.21: 写共享快照(节流控制,失败不影响主循环)
+            _write_shared_market_snapshot(
+                session,
+                indicators_cache,
+                getattr(session, "activity_profile", None) or {},
+                market_status,
+                last_signal=snapshot_last_signal,
+                trend_lock_dir=trend_lock_dir,
+                trend_lock_ts=trend_lock_ts,
+            )
 
         except Exception as e:
             session.error_count += 1
@@ -729,22 +1239,31 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
         pass
 
 
-def _fetch_5m_kline(client, ticker: str, num: int = 30):
+def _fetch_5m_kline(client, ticker: str, num: int = 200):
     try:
         if not client._ensure_quote():
             return None
 
-        # v0.5.15: 先订阅 K_5M，未订阅时 get_cur_kline 返回空/错误是 has_indicators 永远 False 的根因
+        # v0.5.17: subscribe_push=True 确保 Futu Gateway 持续推 K 线实时数据；
+        #          _kl_subscribed 改为 {key: ts} dict，每 KLINE_RESUB_INTERVAL 强制刷新，
+        #          防止连接重置后订阅流静默老化（v0.5.15 用 subscribe_push=False 是冻结根因）
         global _kl_subscribed
         sub_key = (ticker, "K_5M")
-        if sub_key not in _kl_subscribed:
+        now_ts = time.time()
+        if now_ts - _kl_subscribed.get(sub_key, 0) >= KLINE_RESUB_INTERVAL:
             with client._quote_lock:
                 ret_sub, err_sub = client._quote_ctx.subscribe(
-                    [ticker], [SubType.K_5M], subscribe_push=False
+                    [ticker], [SubType.K_5M], subscribe_push=True
                 )
             if ret_sub == 0:
-                _kl_subscribed.add(sub_key)
-                print(f"  [focus] subscribed {ticker} K_5M ✅")
+                _kl_subscribed[sub_key] = now_ts
+                print(f"  [focus] (re)subscribed {ticker} K_5M push=True ✅")
+                # v0.5.19: 注册 push 回调（SDK 支持时），更新 _kl_push_ts 用于冻结检测
+                if _HAS_KLINE_HANDLER:
+                    try:
+                        client._quote_ctx.set_handler(_KLinePushHandler())
+                    except Exception as _he:
+                        print(f"  [focus] set_handler failed (non-fatal): {_he}")
             else:
                 print(f"  [focus] subscribe {ticker} K_5M failed (ret={ret_sub}): {err_sub}")
                 # 订阅失败仍继续尝试 get_cur_kline（可能已在别处订阅）
@@ -808,6 +1327,27 @@ def _fetch_5m_kline(client, ticker: str, num: int = 30):
         if not required.issubset(set(kl.columns)):
             print(f"  [focus] kline missing columns: {kl.columns.tolist()}")
             return None
+
+        # v0.5.18: 按 ET 日期过滤，只保留今日 K 线，防止跨日污染 VWAP/session_high/low
+        if "time_key" in kl.columns:
+            et_today = datetime.now(ET).strftime("%Y-%m-%d")
+            kl_today = kl[kl["time_key"].astype(str).str.startswith(et_today)]
+            if len(kl_today) > 0:
+                kl = kl_today.reset_index(drop=True)
+                print(f"  [focus] kline filtered to {et_today} ET: {len(kl)} bars")
+            else:
+                print(f"  [focus] kline no bars for {et_today} ET, using full {len(kl)} bars (fallback)")
+
+        # v0.5.19: 每次成功必打印诊断行 —— bars / last_time_key / last_vol
+        last_tk  = str(kl["time_key"].iloc[-1])  if "time_key" in kl.columns else "?"
+        last_vol = int(kl["volume"].iloc[-1])     if "volume"   in kl.columns else 0
+        last_cls = float(kl["close"].iloc[-1])    if "close"    in kl.columns else 0.0
+        with _kl_push_lock:
+            last_push = _kl_push_ts.get(ticker, 0)
+        push_age = int(time.time() - last_push) if last_push else -1
+        print(f"  [KLINE] bars={len(kl)}  last={last_tk}  "
+              f"vol={last_vol}  close={last_cls:.2f}  "
+              f"push_age={push_age}s")
 
         return kl
 
