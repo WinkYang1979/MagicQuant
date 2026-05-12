@@ -1,9 +1,53 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — pusher.py
-  VERSION : v0.5.20
-  DATE    : 2026-05-11
+  VERSION : v0.5.28
+  DATE    : 2026-05-13
   CHANGES :
+    v0.5.28 (2026-05-13):
+      - [FIX] _fmt_profit_target: 亏损版文案
+              · 标题 emoji: near_stop→🛑 / 其他亏损→📉 / 盈利→💰
+              · "目前盈利/实际盈利" 按 pl_val 符号换成"亏损"
+              · drawdown 在亏损时 leftover 提示从"上移成本+0.2%保本"
+                改为"跌破 $stop 全清止损"(成本之上的止损在亏损时立刻触发,无意义)
+              · LAST_PLAN_CACHE.reason 同步分支盈/亏
+              配合 swing_detector v0.5.26 — 亏损放行 near_stop/drawdown
+      - [FIX-CRITICAL] _fmt_signal_with_conflict: targets 错配 bug
+              · 之前用 master(RKLB) entry_price 算 T1/T2/stop,
+                显示时却拼成 "RKLX 目标 T1 $XX" — 拿 RKLB 价位
+                标注 follower 入场价旁,导致止损 $119.26 出现在
+                RKLX 买入价 $75.72 上方 +57.5%,永远不会触发。
+              · 修法:同时计算 follower 域 targets(以 follower 现价
+                为入场价),传给 _build_action_plan 显示;master 域
+                targets 仍存 _target_state[master] 供 target_advance
+                检测使用,follower 域同步存 _target_state[follower]
+                供 profit_target/target_advance 查 follower 持仓时使用。
+    v0.5.26 (2026-05-12):
+      - [NEW] _build_decision_context(): 推送时写入完整原始决策数据
+              · kline_data: 最近 30 根 5m K 线 (含 is_today 标记)
+              · indicators_raw: 完整指标 + RSI 最近 5 个历史值
+              · price_context: 现价/day OHLC/prev_close/day_chg%
+              · session_state: loop_count/cash/持仓数/master/followers
+              写入 triggers.json 的 decision_context 字段
+              供 verify_signals.py 精准复盘:数据/逻辑/时机三类问题分类
+    v0.5.24 (2026-05-12):
+      - [REWRITE] _fmt_profit_target 跟随 swing_detector v0.5.24:
+                  按 sub_reason 写标题(near_target/broke_target/overbought_surge
+                  /drawdown/near_stop)
+                  按 tier (1/3, 1/2, 3/4, 全仓) 计算 sell_qty
+                  文案必须包含"为什么 + 做什么 + 剩余怎么处理"
+                  保留扣费后实际盈利行
+    v0.5.22 (2026-05-12):
+      - [FIX] 强度标签中文化: STRONG→强烈 / WEAK→一般，删除英文标签
+              新增 _strength_cn() 辅助函数
+      - [FIX] 持仓盈亏改为"目前盈利 $XX / 目前亏损 $XX"，加上成本价 @$XX
+              _ticker_line / Scenario B / Scenario C / _fmt_profit_target / _fmt_drawdown
+      - [FIX] 目标价/止损前加股票名: "{ticker} 目标 T1 $XX" / "{ticker} 止损 $XX"
+              _fmt_price_targets 新增 ticker 参数，Scenario A/B/C 均传入
+      - [FIX] 删除所有免责声明: "这是方向参考，不是下单指令" 等五处
+    v0.5.21 (2026-05-12):
+      - [FIX] _log_trigger(): record 新增 confidence 字段
+              调用 _confidence_score(hit) 计算并写入，解决 triggers.json confidence=None 问题
     v0.5.20 (2026-05-11):
       - [FIX] 删除 ACCOUNT_SIZE_USD=20000 硬编码兜底;
               get_available_cash(None) 改为返回 0 + 打 ERROR 日志
@@ -44,11 +88,12 @@
 ════════════════════════════════════════════════════════════════════
 """
 
+import time
 from datetime import datetime
 from typing import Optional
 
-VERSION = "v0.5.20"
-SWING_VERSION = "v0.5.21"
+VERSION = "v0.5.28"
+SWING_VERSION = "v0.5.25"
 
 try:
     from .pairs import get_long_tools, get_short_tools, classify_follower
@@ -56,6 +101,11 @@ except ImportError:
     def get_long_tools(m): return []
     def get_short_tools(m): return []
     def classify_follower(m, f): return "unknown"
+
+
+def _strength_cn(strength: str) -> str:
+    """v0.5.22: STRONG/WEAK → 强烈/一般"""
+    return "强烈" if strength == "STRONG" else "一般"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -337,18 +387,20 @@ def _ticker_line(session, ticker, with_position=True):
     if with_position:
         pos = session.get_position(ticker)
         if pos and pos.get("qty", 0) > 0:
-            qty = pos["qty"]
-            pl  = pos.get("pl_val", 0) or 0
-            sign = "+" if pl >= 0 else ""
-            # v0.5.12: 显示扣费后真实盈亏
+            qty  = pos["qty"]
+            pl   = pos.get("pl_val", 0) or 0
             cost = pos.get("cost_price", 0) or 0
+            pl_word = "目前盈利" if pl >= 0 else "目前亏损"
+            # v0.5.22: 显示成本价 + 中文盈亏 + 扣费后真实盈亏
             if price and cost > 0:
                 fee = _estimate_roundtrip_fee(qty, price)
                 true_pl = pl - fee
-                true_sign = "+" if true_pl >= 0 else ""
-                line += f"  💼 {qty:.0f}股 {sign}${pl:.0f} (扣费后 {true_sign}${true_pl:.0f})"
+                true_word = "盈利" if true_pl >= 0 else "亏损"
+                line += (f"  💼 {qty:.0f}股 @{_money(cost)}"
+                         f"  {pl_word} ${abs(pl):.0f}"
+                         f" (扣费后{true_word} ${abs(true_pl):.0f})")
             else:
-                line += f"  💼 {qty:.0f}股 {sign}${pl:.0f}"
+                line += f"  💼 {qty:.0f}股 @{_money(cost)}  {pl_word} ${abs(pl):.0f}"
     return line
 
 def _trio_block(session):
@@ -502,7 +554,7 @@ def _build_action_plan(session, signal_direction, strength, conflict,
             f"   仓位由你决定",
         ]
         # 目标价 T1/T2/止损
-        tgt_str = _fmt_price_targets(targets, signal_direction, same_price)
+        tgt_str = _fmt_price_targets(targets, signal_direction, same_price, same_short)
         if tgt_str:
             lines.append(tgt_str)
 
@@ -542,11 +594,13 @@ def _build_action_plan(session, signal_direction, strength, conflict,
         total_after_sell = round(current_cash + released_cash_net, 2)
 
         # Step 1 详细展示
+        rev_pl_word   = "目前盈利" if rev_pl >= 0 else "目前亏损"
+        true_loss_word = "实际盈利" if true_loss >= 0 else "实际亏损"
         lines += [
             f"⚠️ <b>方向冲突!持有反向头寸 {rev_short}</b>",
             f"{rev_short}: {rev_qty:.0f}股 @{_money(rev_cost)}  "
-            f"浮亏 ${rev_pl:+.0f}",
-            f"         手续费 ~${roundtrip_fee:.2f}  →  实际亏损 ${true_loss:+.0f}",
+            f"{rev_pl_word} ${abs(rev_pl):.0f}",
+            f"         手续费 ~${roundtrip_fee:.2f}  →  {true_loss_word} ${abs(true_loss):.0f}",
             f"",
             f"🅰️ <b>Step 1 — 先平 {rev_short}</b>",
             f"卖 {rev_qty:.0f} 股 @{_money(sell_price)}",
@@ -576,7 +630,7 @@ def _build_action_plan(session, signal_direction, strength, conflict,
                     f"📋 {same_short} × {qty2} 股 @{_money(same_price)}  ({pct_lbl} ${notional2:,.0f})",
                     f"   仓位由你决定",
                 ]
-                tgt_str2 = _fmt_price_targets(targets, signal_direction, same_price)
+                tgt_str2 = _fmt_price_targets(targets, signal_direction, same_price, same_short)
                 if tgt_str2:
                     lines.append(tgt_str2)
                 lines.append(f"剩余 ~${rest_after_buy:,.0f}")
@@ -620,10 +674,11 @@ def _build_action_plan(session, signal_direction, strength, conflict,
         cur_cost = same_pos.get("cost_price", 0)
         cur_pl   = same_pos.get("pl_val", 0) or 0
 
+        cur_pl_word = "目前盈利" if cur_pl >= 0 else "目前亏损"
         lines += [
             f"✅ <b>你已顺势持仓 {same_short}</b>",
             f"现仓 {cur_qty:.0f}股 @{_money(cur_cost)}  "
-            f"{'+'if cur_pl>=0 else ''}${cur_pl:.0f}",
+            f"{cur_pl_word} ${abs(cur_pl):.0f}",
             f"",
             f"<b>🅰️ 继续持有</b>",
         ]
@@ -634,8 +689,8 @@ def _build_action_plan(session, signal_direction, strength, conflict,
         if t1_price and stop_price:
             gap = t1_price - (same_price or cur_cost)
             lines += [
-                f"  等目标 T1 {_money(t1_price)}  (还差 {gap:+.2f})",
-                f"  止损 {_money(stop_price)}  [ATR×1.5]",
+                f"  {same_short} 目标 T1 {_money(t1_price)}  (还差 {gap:+.2f})",
+                f"  {same_short} 止损 {_money(stop_price)}  [ATR×1.5]",
             ]
         else:
             tgt_usd  = STRONG_TARGET_USD if strength == "STRONG" else WEAK_TARGET_USD
@@ -644,8 +699,8 @@ def _build_action_plan(session, signal_direction, strength, conflict,
             stop_price_c = round(cur_cost - stop_usd / max(cur_qty, 1), 2)
             gap = target_price - (same_price or cur_cost)
             lines += [
-                f"  等目标 {_money(target_price)}  (还差 {gap:+.2f})",
-                f"  或止损 {_money(stop_price_c)}",
+                f"  {same_short} 目标 {_money(target_price)}  (还差 {gap:+.2f})",
+                f"  {same_short} 止损 {_money(stop_price_c)}",
             ]
 
         # ── v0.5.9 加仓:用 MIN_ADD_BUDGET_USD($500),不再用 $2000 ──
@@ -728,11 +783,142 @@ def _cache_all(plans, signal_info):
 # ══════════════════════════════════════════════════════════════════
 #  v0.5.13 自动日志(复盘数据源)
 # ══════════════════════════════════════════════════════════════════
+def _build_decision_context(session, hit):
+    """
+    v0.5.26: 收集推送时实际使用的原始决策数据 —— 供 verify_signals.py 精准复盘。
+
+    返回 dict:
+      kline_data:  {period, bars_count, bars: [{time,open,high,low,close,volume}], is_today}
+      indicators_raw: {rsi_14, rsi_history, vwap, vol_ratio, vol_current, vol_ma_base, ...}
+      price_context:  {current, day_open, day_high, day_low, prev_close, day_change_pct}
+      session_state:  {loop_count, cash_available, positions_count, master, followers}
+
+    任一子项失败时该字段返回 None,不影响主日志写入。
+    """
+    ctx = {"kline_data": None, "indicators_raw": None,
+           "price_context": None, "session_state": None}
+    if session is None:
+        return ctx
+
+    # ── kline_data: 取 session._last_kline_cache 最近 30 根 ──
+    try:
+        kl = getattr(session, "_last_kline_cache", None)
+        if kl is not None and hasattr(kl, "tail"):
+            tail = kl.tail(30)
+            bars = []
+            for _, row in tail.iterrows():
+                bars.append({
+                    "time":   str(row.get("time_key", "")),
+                    "open":   round(float(row.get("open", 0)), 4),
+                    "high":   round(float(row.get("high", 0)), 4),
+                    "low":    round(float(row.get("low", 0)), 4),
+                    "close":  round(float(row.get("close", 0)), 4),
+                    "volume": int(row.get("volume", 0)),
+                })
+            attrs = getattr(kl, "attrs", {}) or {}
+            ctx["kline_data"] = {
+                "period":     "5m",
+                "bars_count": len(bars),
+                "bars":       bars,
+                "is_today":   bool(attrs.get("has_today_data", True)),
+            }
+    except Exception as e:
+        print(f"  [decision_context] kline_data failed: {e}")
+
+    # ── indicators_raw: 完整指标 + RSI 最近 5 个值 ──
+    try:
+        ind = getattr(session, "_last_indicators_cache", {}) or {}
+        rsi_history = []
+        # 计算 RSI 历史:对 kline.close 滚动算最近 5 个 RSI 值
+        try:
+            from .micro_indicators import calc_rsi_fast
+            kl = getattr(session, "_last_kline_cache", None)
+            if kl is not None and "close" in kl.columns and len(kl) >= 20:
+                closes = kl["close"].astype(float)
+                # 末尾 5 个时间点上分别算一次 RSI
+                for offset in range(4, -1, -1):
+                    end_idx = len(closes) - offset
+                    if end_idx >= 15:
+                        rsi_history.append(calc_rsi_fast(closes.iloc[:end_idx], 14))
+        except Exception:
+            pass
+
+        # vol_ma_base = 量比的基准值 (3 根均量基准)
+        vol_current = None
+        try:
+            kl = getattr(session, "_last_kline_cache", None)
+            if kl is not None and "volume" in kl.columns and len(kl) >= 1:
+                vol_current = int(kl["volume"].iloc[-1])
+        except Exception:
+            pass
+
+        ctx["indicators_raw"] = {
+            "rsi_14":       ind.get("rsi_5m"),
+            "rsi_history":  rsi_history if rsi_history else None,
+            "vwap":         ind.get("vwap"),
+            "vol_ratio":    ind.get("vol_ratio"),
+            "vol_current":  vol_current,
+            "session_high": ind.get("session_high"),
+            "session_low":  ind.get("session_low"),
+            "dist_high":    ind.get("dist_high"),
+            "dist_low":     ind.get("dist_low"),
+            "candle":       ind.get("candle"),
+            "data_ok":      ind.get("data_ok"),
+            "is_today":     ind.get("is_today"),
+        }
+    except Exception as e:
+        print(f"  [decision_context] indicators_raw failed: {e}")
+
+    # ── price_context ──
+    try:
+        tk = hit.get("ticker") or session.master
+        current = session.get_last_price(tk)
+        q = (getattr(session, "quote_snapshot", {}) or {}).get(tk) or {}
+        ind = getattr(session, "_last_indicators_cache", {}) or {}
+        # day_open / day_high / day_low 优先从 K 线第一根/极值取
+        day_open = day_high = day_low = None
+        try:
+            kl = getattr(session, "_last_kline_cache", None)
+            if kl is not None and len(kl) > 0:
+                day_open = round(float(kl["open"].iloc[0]), 4)
+                day_high = round(float(kl["high"].max()), 4)
+                day_low  = round(float(kl["low"].min()),  4)
+        except Exception:
+            pass
+        ctx["price_context"] = {
+            "current":        round(float(current), 4) if current else None,
+            "day_open":       day_open,
+            "day_high":       day_high,
+            "day_low":        day_low,
+            "prev_close":     q.get("prev_close"),
+            "day_change_pct": q.get("change_pct"),
+        }
+    except Exception as e:
+        print(f"  [decision_context] price_context failed: {e}")
+
+    # ── session_state ──
+    try:
+        ctx["session_state"] = {
+            "loop_count":     getattr(session, "loop_count", 0),
+            "cash_available": getattr(session, "cash_available", None),
+            "positions_count": len([p for p in (session.positions_snapshot or {}).values()
+                                    if p and p.get("qty", 0) > 0]),
+            "master":         getattr(session, "master", None),
+            "followers":      list(getattr(session, "followers", []) or []),
+        }
+    except Exception as e:
+        print(f"  [decision_context] session_state failed: {e}")
+
+    return ctx
+
+
 def _log_trigger(hit, result, session=None):
     """
     v0.5.13: 每次推送触发,写入 data/review/YYYY-MM-DD/triggers.json
     便于第二天自动复盘,不需要再截图 Telegram
     写失败不影响主流程(静默失败)
+
+    v0.5.26: 新增 decision_context 字段,保存推送时实际使用的所有原始数据
     """
     try:
         import os
@@ -792,6 +978,9 @@ def _log_trigger(hit, result, session=None):
             except Exception:
                 pass
 
+        # v0.5.26: 决策上下文 — 完整还原推送时的原始数据
+        decision_context = _build_decision_context(session, hit)
+
         # 组装记录
         record = {
             "ts": _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -799,6 +988,7 @@ def _log_trigger(hit, result, session=None):
             "ticker": hit.get("ticker"),
             "direction": hit.get("direction"),
             "strength": hit.get("strength"),
+            "confidence": _confidence_score(hit),   # v0.5.21: 信心指数写入日志
             "profile": profile_info,
             "data": hit.get("data", {}),
             "prices": prices_snapshot,
@@ -807,6 +997,7 @@ def _log_trigger(hit, result, session=None):
             "message_text": result.get("text", "") if isinstance(result, dict) else "",
             "pusher_version": VERSION,
             "swing_version": SWING_VERSION,
+            "decision_context": decision_context,   # v0.5.26
         }
 
         records.append(record)
@@ -844,6 +1035,8 @@ def format_trigger_message(hit, session=None):
         result = _fmt_overbought_surge(hit, session)
     elif trigger == "large_day_gain":
         result = _fmt_large_day_gain(hit, session)
+    elif trigger == "target_advance":
+        result = _fmt_target_advance(hit, session)
     else:
         result = {"text": hit.get("title", "未知"), "buttons": None, "style": hit.get("style", "C")}
 
@@ -871,6 +1064,58 @@ def _wrap_message(text, session, ticker, manual_cmd=None):
 # ══════════════════════════════════════════════════════════════════
 #  v0.5.19 新触发类型推送格式
 # ══════════════════════════════════════════════════════════════════
+def _fmt_target_advance(hit, session=None):
+    """
+    v0.5.23: T1 突破后推新一档目标价。
+    自动用当前价重算 T1/T2/stop，并写回 session._target_state
+    """
+    d = hit["data"]
+    ticker = hit["ticker"]
+    m = ticker.replace("US.", "")
+    direction = hit.get("direction", "long")
+    cur_px = d.get("current", 0) or 0
+    old_t1 = d.get("old_t1", 0) or 0
+
+    # 用当前价重算
+    new_targets = _calc_price_targets(session, ticker, direction, cur_px) if session else {}
+    new_t1   = new_targets.get("t1")
+    new_t2   = new_targets.get("t2")
+    new_stop = new_targets.get("stop")
+
+    # 写回新状态（关键：下一次突破以新 T1 为准）
+    if session and new_t1:
+        if not hasattr(session, '_target_state'):
+            session._target_state = {}
+        session._target_state[ticker] = {
+            "direction":    direction,
+            "t1":           new_t1,
+            "t2":           new_t2,
+            "stop":         new_stop,
+            "set_at_price": cur_px,
+            "set_at_ts":    time.time(),
+        }
+
+    arrow = "✅ 突破" if direction == "long" else "✅ 跌破"
+    lines = [
+        f"📐 <b>目标升级 · {m}</b>",
+        f"━━━━━━━━━━━━━━",
+        f"{arrow} 原 T1 {_money(old_t1)}  ·  现价 <b>{_money(cur_px)}</b>",
+    ]
+    if new_t1 and cur_px > 0:
+        nt1_pct = (new_t1 - cur_px) / cur_px * 100
+        lbl = new_targets.get("t1_label", "")
+        lines.append(f"新 T1 → <b>{_money(new_t1)}</b>  ({nt1_pct:+.1f}%)  [{lbl}]")
+    if new_t2 and cur_px > 0:
+        nt2_pct = (new_t2 - cur_px) / cur_px * 100
+        lbl = new_targets.get("t2_label", "")
+        lines.append(f"新 T2 → {_money(new_t2)}  ({nt2_pct:+.1f}%)  [{lbl}]")
+    if new_stop and cur_px > 0:
+        stop_pct = (new_stop - cur_px) / cur_px * 100
+        lines.append(f"新止损 → {_money(new_stop)}  ({stop_pct:+.1f}%)  [ATR×1.5]")
+
+    return {"text": "\n".join(lines), "buttons": [], "style": "B"}
+
+
 def _fmt_near_resistance(hit, session=None):
     d            = hit["data"]
     ticker_short = hit["ticker"].replace("US.", "")
@@ -884,8 +1129,6 @@ def _fmt_near_resistance(hit, session=None):
         f"还有 <b>{dist_pct:.1f}%</b> 到目标阻力位",
         f"",
         f"💡 持有 RKLX 建议准备分批止盈，不要等到顶",
-        f"",
-        f"这是风险提醒，不是卖出信号。",
     ]
     lines += _trio_block(session)
     return {"text": "\n".join(lines), "buttons": [], "style": "C"}
@@ -904,8 +1147,6 @@ def _fmt_near_support(hit, session=None):
         f"还有 <b>{dist_pct:.1f}%</b> 到支撑位",
         f"",
         f"💡 看多 RKLX 布局机会临近，等确认再进",
-        f"",
-        f"这是风险提醒，不是买入信号。",
     ]
     lines += _trio_block(session)
     return {"text": "\n".join(lines), "buttons": [], "style": "C"}
@@ -923,8 +1164,6 @@ def _fmt_overbought_surge(hit, session=None):
         f"RSI <b>{rsi:.1f}</b>  量比 <b>{vol_ratio:.1f}x</b>  日内 {day_chg:+.2f}%",
         f"",
         f"⚠️ RSI 过热 + 放量 = 顶部风险，持有 RKLX 考虑逐步锁定利润",
-        f"",
-        f"这是风险提醒，不是卖出指令。",
     ]
     lines += _trio_block(session)
     buttons = [[{"text": "🧠 AI", "callback_data": f"focus_ai_{ticker_short}"}]]
@@ -942,56 +1181,156 @@ def _fmt_large_day_gain(hit, session=None):
         f"现价 {_money(current)}  日内 {day_chg:+.2f}%",
         f"",
         f"⚠️ 大涨后回调风险增加，建议逐步锁定利润，不建议此时追加买入",
-        f"",
-        f"这是风险提醒，不是卖出指令。",
     ]
     lines += _trio_block(session)
     buttons = [[{"text": "🧠 AI", "callback_data": f"focus_ai_{ticker_short}"}]]
     return {"text": "\n".join(lines), "buttons": buttons, "style": "B"}
 
 
-# ── 浮盈达标 ──────────────────────────────────────────────
+# ── 浮盈达标 v0.5.24 重写 ─────────────────────────────────
+_PROFIT_SUB_REASON_HEADER = {
+    "near_target":      "接近目标位",
+    "broke_target":     "突破目标位",
+    "overbought_surge": "超买放量",
+    "drawdown":         "高点回落",
+    "near_stop":        "接近止损",
+}
+_PROFIT_SUB_REASON_WHY = {
+    "near_target":      "目标位就在眼前,先锁部分盈利,剩余仓位等更高目标",
+    "broke_target":     "已突破第一目标,建议止盈+上移止损至成本上方,锁定利润",
+    "overbought_surge": "RSI + 放量过热,顶部风险大,先收一波利润再说",
+    "drawdown":         "高点回吐,趋势可能转弱,保住浮盈优先",
+    "near_stop":        "止损位近在咫尺,无论如何先收回成本",
+}
+
+
 def _fmt_profit_target(hit, session=None):
     d            = hit["data"]
     ticker_short = hit["ticker"].replace("US.", "")
-    qty          = d["qty"]
+    qty          = int(d.get("qty") or 0)
     pl_val       = d.get("pl_val") or 0
+    pl_pct       = d.get("pl_pct") or 0
     current      = d.get("current") or 0
     cost         = d.get("cost") or 0
+    sub_reason   = d.get("sub_reason", "near_target")
+    tier         = int(d.get("tier") or 2)
+    tier_text    = d.get("tier_text", "")
+    sell_qty     = int(d.get("sell_qty") or max(1, qty // 2))
+    sell_price   = d.get("sell_price") or round(current * 1.003, 2)
+    t1           = d.get("t1")
+    stop         = d.get("stop")
+    hold_sec     = int(d.get("hold_seconds") or 0)
+    short_hold   = bool(d.get("short_hold"))
 
-    if pl_val >= PROFIT_BIG_USD:
-        sell_qty  = qty
-        strategy  = "🎯 <b>全仓兑现</b>"
-        sell_price = round(current * 1.001, 2)
-    else:
-        sell_qty  = int(qty / 2)
-        strategy  = "🎯 <b>分批兑现(卖半仓)</b>"
-        sell_price = round(current * 1.003, 2)
-
-    stop_up = round(cost * 1.002, 2)
-    sign    = "+" if pl_val >= 0 else ""
-
-    # v0.5.12: 显示扣费后真实浮盈
-    fee = _estimate_roundtrip_fee(qty, current) if (qty and current) else 0
+    # 实际手续费用 pusher 精确估算覆盖 swing_detector 粗估
+    fee     = _estimate_roundtrip_fee(qty, current) if (qty and current) else 0
     true_pl = pl_val - fee
-    true_sign = "+" if true_pl >= 0 else ""
 
+    header_word = _PROFIT_SUB_REASON_HEADER.get(sub_reason, "止盈提醒")
+    why         = _PROFIT_SUB_REASON_WHY.get(sub_reason, "")
+
+    # v0.5.28: 盈/亏文案区分
+    is_loss = pl_val < 0
+    if is_loss:
+        # 亏损版 why 覆盖 (盈利版的"浮盈优先"/"收回成本"在亏损语境下不通)
+        _LOSS_WHY = {
+            "drawdown":  "已从高点回吐进入亏损,趋势走弱风险加大,先减仓控制损失",
+            "near_stop": "止损位近在咫尺,严守纪律先减仓,避免被打穿后扩大损失",
+        }
+        why = _LOSS_WHY.get(sub_reason, why)
+        # 亏损时 tier_text "止盈" 改 "减仓"
+        if tier_text:
+            tier_text = (tier_text
+                         .replace("考虑部分止盈", "考虑部分减仓控损")
+                         .replace("分批止盈半仓", "分批减仓半仓")
+                         .replace("止盈大部分", "减仓大部分")
+                         .replace("强烈建议全部止盈", "强烈建议立即清仓"))
+    sign = "+" if pl_pct >= 0 else ""
+    if is_loss and sub_reason == "near_stop":
+        title_emoji = "🛑"
+    elif is_loss:
+        title_emoji = "📉"
+    else:
+        title_emoji = "💰"
+    title = f"{title_emoji} <b>{ticker_short} {sign}{pl_pct:.1f}% · {header_word}</b>"
+
+    # 持仓时长描述
+    hold_min = hold_sec // 60
+    if hold_min < 60:
+        hold_str = f"{hold_min} 分钟"
+    elif hold_min < 60 * 24:
+        hold_str = f"{hold_min // 60} 小时{hold_min % 60} 分"
+    else:
+        hold_str = f"{hold_min // (60*24)} 天"
+
+    # 详细参数行 (因为 sub_reason 是关键决策点,把各档位置具体数字摆出来)
+    detail = []
+    if sub_reason in ("near_target", "broke_target") and t1:
+        gap_pct = (t1 - current) / current * 100
+        if sub_reason == "broke_target":
+            detail.append(f"目标 T1 ${t1:.2f} 已突破 · 现价 {_money(current)}")
+        else:
+            detail.append(f"目标 T1 ${t1:.2f} · 距现价 {gap_pct:+.2f}%")
+    elif sub_reason == "overbought_surge":
+        detail.append(f"现价 {_money(current)} · 浮盈 +{pl_pct:.1f}%")
+    elif sub_reason == "drawdown":
+        peak = getattr(session, "peak_price", {}).get(hit["ticker"]) if session else None
+        if peak:
+            dd = (current - peak) / peak * 100
+            detail.append(f"峰值 ${peak:.2f} → 现价 {_money(current)} (回撤 {dd:.2f}%)")
+    elif sub_reason == "near_stop" and stop:
+        gap_pct = (current - stop) / current * 100
+        detail.append(f"止损 ${stop:.2f} · 距现价 {gap_pct:+.2f}%")
+
+    # v0.5.28: 盈/亏措辞
+    pl_word      = "目前亏损" if is_loss else "目前盈利"
+    true_pl_word = "实际亏损" if true_pl < 0 else "实际盈利"
     lines = [
-        f"💰 <b>{ticker_short} 浮盈达标</b>",
-        f"━━━━━━━━━━━━━━",
-        f"{ticker_short} {_money(current)}  {qty:.0f}股 @{_money(cost)}  浮盈 {sign}${pl_val:.2f}",
-        f"              手续费 ~${fee:.2f}  →  实际浮盈 {true_sign}${true_pl:.2f}",
-        f"",
-        strategy,
-        f"卖 {sell_qty} 股 @{_money(sell_price)}",
+        title,
+        "━━━━━━━━━━━━━━",
+        f"{qty} 股 @{_money(cost)} → 现价 {_money(current)}",
+        f"{pl_word} ${abs(pl_val):.2f} ({sign}{pl_pct:.2f}%) · 持仓 {hold_str}",
+        f"手续费 ~${fee:.2f}  →  {true_pl_word} ${abs(true_pl):.2f}",
     ]
-    if sell_qty < qty:
-        lines.append(f"剩 {qty-sell_qty:.0f} 股 止损上移 {_money(stop_up)}")
+    if detail:
+        lines.extend(detail)
+    lines.append("")
+
+    # 动作建议 — sell_qty 已按 tier 算好,这里给"为什么 + 剩余怎么处理"
+    if sell_qty >= qty:
+        verb = "全仓清仓止损" if is_loss else "全仓兑现"
+        action_line = f"🎯 <b>{verb}</b>:卖 {sell_qty} 股 @{_money(sell_price)}"
+        leftover_line = None
+    else:
+        action_line = f"🎯 <b>{tier_text}</b>:卖 {sell_qty} 股 @{_money(sell_price)}"
+        leftover_qty = qty - sell_qty
+        if sub_reason == "broke_target":
+            leftover_line = f"剩 {leftover_qty} 股 · 止损上移到 {_money(round(cost * 1.005, 2))} (成本+0.5%)"
+        elif sub_reason == "near_stop":
+            leftover_line = f"剩 {leftover_qty} 股 · 若跌破 ${stop:.2f} 立即清仓"
+        elif sub_reason in ("overbought_surge", "drawdown"):
+            # v0.5.28: 亏损时"上移到成本"会立刻触发,改用 stop 价或现价×0.98
+            if is_loss:
+                hard_stop = stop or round(current * 0.98, 2)
+                leftover_line = f"剩 {leftover_qty} 股 · 若跌破 {_money(hard_stop)} 全清止损"
+            else:
+                leftover_line = f"剩 {leftover_qty} 股 · 止损上移到 {_money(round(cost * 1.002, 2))} 保本"
+        else:
+            leftover_line = f"剩 {leftover_qty} 股 · 等更高目标"
+
+    lines.append(action_line)
+    if leftover_line:
+        lines.append(leftover_line)
+    if why:
+        lines.append(f"💡 {why}")
+    if short_hold:
+        lines.append(f"⚠️ 注意:持仓仅 {hold_str},短线翻动大,确认条件再下手")
 
     LAST_PLAN_CACHE[ticker_short] = {
         "action": "SELL", "ticker": ticker_short,
         "qty": sell_qty, "price": sell_price,
-        "reason": f"浮盈 {sign}${pl_val:.2f} 达标",
+        "reason": (f"{header_word} · 亏损 {pl_pct:.1f}%" if is_loss
+                   else f"{header_word} · 浮盈 +{pl_pct:.1f}%"),
     }
     buttons = [
         [{"text": f"📋 卖 {sell_qty}股", "callback_data": f"focus_order_{ticker_short}"}],
@@ -1022,14 +1361,15 @@ def _fmt_drawdown(hit, session=None):
         plp  = pos.get("pl_pct", 0) or 0
         sign = "+" if pl >= 0 else ""
 
-        # v0.5.12: 扣费后真实盈亏
+        # v0.5.22: 扣费后真实盈亏，中文标签
         fee = _estimate_roundtrip_fee(qty, current) if current else 0
         true_pl = pl - fee
-        true_sign = "+" if true_pl >= 0 else ""
+        pl_word      = "目前盈利" if pl >= 0 else "目前亏损"
+        true_pl_word = "实际盈利" if true_pl >= 0 else "实际亏损"
 
         lines += ["", f"💼 {qty:.0f}股 @{_money(pos.get('cost_price',0))}  "
-                     f"{sign}${pl:.2f} ({sign}{plp:.2f}%)",
-                  f"    手续费 ~${fee:.2f}  →  实际 {true_sign}${true_pl:.2f}"]
+                     f"{pl_word} ${abs(pl):.2f} ({sign}{plp:.2f}%)",
+                  f"    手续费 ~${fee:.2f}  →  {true_pl_word} ${abs(true_pl):.2f}"]
         if pl >= PROFIT_SMALL_USD:
             act_half   = int(qty / 2)
             sell_price = round(current * 0.998, 2)
@@ -1136,9 +1476,10 @@ def _calc_price_targets(session, ticker: str, direction: str, entry_price: float
     return result
 
 
-def _fmt_price_targets(targets: dict, direction: str, entry_price: float) -> str:
+def _fmt_price_targets(targets: dict, direction: str, entry_price: float,
+                       ticker: str = "") -> str:
     """
-    v0.5.19: T1/T2/止损 三行格式 + 盈亏比
+    v0.5.22: 新增 ticker 参数，T1/T2/止损前加股票名（如"RKLX 目标 T1 $12.50"）
     """
     if not targets:
         return ""
@@ -1148,18 +1489,19 @@ def _fmt_price_targets(targets: dict, direction: str, entry_price: float) -> str
     if not (t1 or stop):
         return ""
 
+    pfx = f"{ticker} " if ticker else ""
     lines = ["📐 <b>目标价</b>"]
     if t1:
         t1_pct = (t1 - entry_price) / entry_price * 100
         lbl = targets.get("t1_label", "")
-        lines.append(f"   T1 {_money(t1)}  ({t1_pct:+.1f}%)  [{lbl}]")
+        lines.append(f"   {pfx}目标 T1 {_money(t1)}  ({t1_pct:+.1f}%)  [{lbl}]")
     if t2:
         t2_pct = (t2 - entry_price) / entry_price * 100
         lbl = targets.get("t2_label", "")
-        lines.append(f"   T2 {_money(t2)}  ({t2_pct:+.1f}%)  [{lbl}]")
+        lines.append(f"   {pfx}目标 T2 {_money(t2)}  ({t2_pct:+.1f}%)  [{lbl}]")
     if stop:
         stop_pct = (stop - entry_price) / entry_price * 100
-        lines.append(f"   止损 {_money(stop)}  ({stop_pct:+.1f}%)  [ATR×1.5]")
+        lines.append(f"   {pfx}止损 {_money(stop)}  ({stop_pct:+.1f}%)  [ATR×1.5]")
         if t1 and entry_price:
             reward = abs(t1 - entry_price)
             risk   = abs(entry_price - stop)
@@ -1194,18 +1536,51 @@ def _fmt_signal_with_conflict(hit, session, signal_direction, title_line, tech_l
     if tech_line:
         lines.append(tech_line)
 
-    # v0.5.19: 新版目标价 T1/T2/止损
-    targets = {}
+    # v0.5.28: 目标价分两域计算
+    #   master 域: 给 check_target_advance(master_ticker) 使用 — 检测 master 突破
+    #   follower 域: 给推送显示和 follower 持仓的 profit_target 使用 — 价位与入场域一致
+    # 此前用 master entry_price 算的 t1/t2/stop 被错标成 "RKLX 目标 T1 $XX",
+    # 导致止损 $119(RKLB域) 显示在 RKLX $75 入场价上方,永不触发。
+    master_targets = {}
     if entry_price:
-        targets = _calc_price_targets(session, hit["ticker"], signal_direction, entry_price)
+        master_targets = _calc_price_targets(session, hit["ticker"], signal_direction, entry_price)
+
+    follower_price = (session.get_last_price(target_etf)
+                      if (session and target_etf) else None)
+    follower_targets = {}
+    if target_etf and follower_price:
+        follower_targets = _calc_price_targets(session, target_etf, signal_direction, follower_price)
+
+    # 持久化两份目标态:master 用 master 价位、follower 用 follower 价位
+    if session and not hasattr(session, '_target_state'):
+        session._target_state = {}
+    if session and entry_price and master_targets.get("t1"):
+        session._target_state[hit["ticker"]] = {
+            "direction":    signal_direction,
+            "t1":           master_targets["t1"],
+            "t2":           master_targets.get("t2"),
+            "stop":         master_targets.get("stop"),
+            "set_at_price": entry_price,
+            "set_at_ts":    time.time(),
+        }
+    if session and target_etf and follower_price and follower_targets.get("t1"):
+        session._target_state[target_etf] = {
+            "direction":    signal_direction,
+            "t1":           follower_targets["t1"],
+            "t2":           follower_targets.get("t2"),
+            "stop":         follower_targets.get("stop"),
+            "set_at_price": follower_price,
+            "set_at_ts":    time.time(),
+        }
 
     conflict = analyze_position_conflict(session, signal_direction)
+    # 显示给用户的 targets 必须用 follower 域 (与 same_price 同域),否则百分比/止损全错
+    display_targets = follower_targets if follower_targets.get("t1") else master_targets
     action   = _build_action_plan(session, signal_direction, strength, conflict,
-                                  conf=conf, targets=targets)
+                                  conf=conf, targets=display_targets)
 
     lines.append("")
     lines += action["lines"]
-    lines += ["", "这是方向参考，不是下单指令。"]
 
     _cache_all(action["caches"], {"source": title_line, "direction": signal_direction})
 
@@ -1236,7 +1611,7 @@ def _fmt_swing_top(hit, session=None):
         tech += "\n命中: " + " ".join(f"{'✅' if v else '❌'}{k}" for k,v in marks)
 
     return _fmt_signal_with_conflict(
-        hit, session, "short", f"🔴 <b>{m} 波段顶</b> [{strength}]", tech)
+        hit, session, "short", f"🔴 <b>{m} 波段顶</b> [{_strength_cn(strength)}]", tech)
 
 
 def _fmt_swing_bottom(hit, session=None):
@@ -1258,7 +1633,7 @@ def _fmt_swing_bottom(hit, session=None):
         tech += "\n命中: " + " ".join(f"{'✅' if v else '❌'}{k}" for k,v in marks)
 
     return _fmt_signal_with_conflict(
-        hit, session, "long", f"🟢 <b>{m} 波段底</b> [{strength}]", tech)
+        hit, session, "long", f"🟢 <b>{m} 波段底</b> [{_strength_cn(strength)}]", tech)
 
 
 def _fmt_direction_trend(hit, session=None):
@@ -1269,7 +1644,7 @@ def _fmt_direction_trend(hit, session=None):
     has_ind   = d.get("has_indicators", False)
 
     emoji, word = ("🚀", "看多") if direction == "long" else ("📉", "看空")
-    title = f"{emoji} <b>{m} 方向信号 ({word})</b> [{strength}]"
+    title = f"{emoji} <b>{m} 方向信号 ({word})</b> [{_strength_cn(strength)}]"
 
     if has_ind:
         tech = (f"RSI {_num(d.get('rsi'),'.1f')}  ·  "

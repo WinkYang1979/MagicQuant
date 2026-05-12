@@ -1,9 +1,80 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — swing_detector.py
-  VERSION : v0.5.19
-  DATE    : 2026-05-08
+  VERSION : v0.5.26
+  DATE    : 2026-05-13
   CHANGES :
+    v0.5.26 (2026-05-13):
+      - [FIX] check_profit_target: 亏损时也允许 near_stop / drawdown
+              告警通过。之前 pl_val<$5 / 扣费后亏损 两个抑制把所有
+              sub_reason 一刀切,导致亏损时连"接近止损位""高点回撤"
+              都静默 → 用户在 RKLX 跌 8% 期间没收到任何卖出推送。
+              · in_loss 标志只过滤盈利专属类型 (near_target/
+                broke_target/overbought_surge)
+              · near_stop/drawdown 是风险告警语义,亏损时更应该推送
+              · tier_info 在 pl_pct<0 时自然得到 tier=1(减仓 1/3)
+    v0.5.25 (2026-05-12):
+      - [FIX] swing_top / swing_bottom / overbought_surge:严格要求
+              indicators.is_today=True 才触发。盘前 RTH K 线缺失时
+              fallback 用昨日数据,RSI 反映昨日跌势但 day_chg 是盘前涨幅,
+              时段错配 → 直接 skip
+      - [NEW] swing_bottom 加强趋势过滤:日内涨幅 >= swing_bottom_strong_trend_pct
+              (5%) 时禁触看多,对称于 swing_top 的处理。已经大涨不存在"底"
+      - [NEW] buy 方向信号现金门槛过滤:run_all_triggers 在出口检查
+              session.cash_available < MIN_BUDGET_USD($2000) 时,
+              静默 swing_bottom / near_support / direction_trend long
+              避免推送无法操作的信号造成噪声
+    v0.5.24 (2026-05-12):
+      - [REWRITE] check_profit_target 完全重写,从"机械金额触发"改为
+                  "利益最大化的上下文感知止盈"
+                  · 抑制:无持仓 / 盈利<$5 / 扣费后亏损 / <30min非紧急
+                          / 趋势锁定且距 T1>2% 且最近创新高 (让利润奔跑)
+                  · 触发:接近 T1 / 突破 T1 / RSI>=78+量比>=3x
+                         / 高点回撤>=2% / 接近止损<1%
+                  · 紧急触发豁免 30 分钟最短持仓限制
+                  · 文案按 pl_pct 档位 (<3/3-8/8-15/>15) 给不同卖出比例
+                  · trigger 名保留 profit_target_hit (向后兼容日志/dashboard)
+      - [NEW] DEFAULT_PARAMS: 删除 profit_target_pct/profit_target_usd
+              新增 profit_min_pl_usd / profit_min_hold_sec
+              / profit_let_run_dist_pct / profit_let_run_new_high_window
+              / profit_near_t1_pct / profit_near_stop_pct
+              / profit_drawdown_pct / profit_overbought_rsi
+              / profit_overbought_vol / profit_tier_pct (3/8/15)
+              / profit_fee_per_share (扣费估算)
+      - [CHG] run_all_triggers: master 也调用 check_profit_target
+              drawdown_from_peak / overbought_surge / near_resistance
+              命中时若持仓盈利已被 profit_target 覆盖,则跳过避免重复
+    v0.5.22 (2026-05-12):
+      - [FIX] check_near_resistance(): 突破阻力位后自动上移到下一档
+              新增 session._near_resist_last[ticker] 记录上次预警阻力位
+              只有 session_high 上移 ≥1% 才重新预警，消除同档阻力位刷屏
+      - [FIX] check_rapid_move(): data 字段新增 has_indicators
+              便于 triggers.json 复盘判断 RSI/vol_ratio 是否实际可用
+      - [FIX] rapid_move_pct: 0.8% → 1.0%，降低噪音触发频率
+      - [FIX] check_near_resistance / check_large_day_gain: direction 改为 neutral
+              action_intent 分别标 avoid_chasing / take_profit，不再误标 short
+              避免用户误认为是做空建议
+    v0.5.21 (2026-05-11):
+      - [NEW] check_near_resistance(): 价格距阻力位 <3% → 准备卖出预警
+              trigger=near_resistance, cooldown=600s
+      - [NEW] check_near_support(): 价格距支撑位 <3% → 准备买入预警
+              trigger=near_support, cooldown=600s
+      - [NEW] check_overbought_surge(): RSI>80 + 量比>3x → 超买放量止盈警告
+              trigger=overbought_surge, cooldown=600s
+      - [NEW] check_large_day_gain(): 日内涨幅>10% → 大幅上涨注意锁定利润
+              trigger=large_day_gain, cooldown=1800s
+      - [NEW] 多空转换确认机制: direction_trend SHORT 方向新增回落确认
+              价格从近20点高点回落 < flip_short_confirm_pct(2%) 则不转空
+              防止单靠 rapid_move 误转空导致频繁横跳
+      - 对应新参数: near_resist_warn_pct=3.0 / near_support_warn_pct=3.0
+                   near_warn_cooldown=600 / overbought_surge_rsi=80
+                   overbought_surge_vol=3.0 / large_day_gain_pct=10.0
+                   flip_short_confirm_pct=2.0
+    v0.5.20 (2026-05-09):
+      - [NEW] check_swing_top 强趋势过滤:
+              日内涨幅 >= swing_top_strong_trend_pct(5%) 时禁触 swing_top 看空
+              强趋势中不逆势操作，避免在上涨行情中误发做空信号
+              对应新参数: swing_top_strong_trend_pct=5.0
     v0.5.19 (2026-05-08):
       - [FIX] profit_target_hit 冷却 300s → 600s(同 ticker 至少 10 分钟才再推)
               原因:同日触发 82 次,严重刷屏
@@ -57,12 +128,30 @@ from typing import Optional
 
 
 DEFAULT_PARAMS = {
-    "profit_target_pct":    1.5,
-    "profit_target_usd":    30.0,
+    # v0.5.24: profit_target 完全重写 — 旧固定阈值删除
+    # 抑制阈值
+    "profit_min_pl_usd":            5.0,    # 浮盈 < $5 不触发
+    "profit_min_hold_sec":          1800,   # 持仓 < 30 分钟非紧急不触发
+    "profit_fee_per_share":         0.02,   # roundtrip 单股估算费 (用于扣费判定)
+    # 让利润奔跑 (三条同时满足才抑制)
+    "profit_let_run_dist_pct":      2.0,    # 距 T1 > 2% 才让奔跑
+    "profit_let_run_new_high_window": 300,  # 最近 5 分钟创新高 (秒)
+    # 触发阈值
+    "profit_near_t1_pct":           1.0,    # 距 T1 < 1% → near_target
+    "profit_near_stop_pct":         1.0,    # 距 stop < 1% → near_stop
+    "profit_drawdown_pct":          2.0,    # 从 peak 回撤 >= 2% → drawdown
+    "profit_overbought_rsi":        78,     # RSI >= 78 + vol >= 3x → overbought
+    "profit_overbought_vol":        3.0,
+    # 档位 (盈利百分比边界)
+    "profit_tier1_max_pct":         3.0,    # <3%   → 1/3 仓
+    "profit_tier2_max_pct":         8.0,    # 3-8%  → 1/2 仓
+    "profit_tier3_max_pct":         15.0,   # 8-15% → 3/4 仓
+                                            # >15%  → 全仓
+
     "drawdown_pct":         0.8,
 
     # v0.5.5: 快速异动阈值提高,冷却加长
-    "rapid_move_pct":             0.8,    # master ticker (RKLB) 阈值
+    "rapid_move_pct":             1.0,    # master ticker (RKLB) 阈值 (v0.5.22: 0.8→1.0 降低噪音)
     "rapid_move_pct_follower":    1.20,   # v0.5.17: follower (RKLX/RKLZ) 独立阈值
     "rapid_move_window":          120,
     "rapid_move_cooldown":        1200,   # ← 600 → 1200 (20分钟)
@@ -94,9 +183,29 @@ DEFAULT_PARAMS = {
 
     "global_mutex_sec":      60,
 
+    # v0.5.20: 强趋势过滤——日内涨幅超此值时禁触 swing_top 看空
+    "swing_top_strong_trend_pct": 5.0,
+    # v0.5.25: 日内大涨/大跌时禁触反向 swing 信号
+    "swing_bottom_strong_trend_pct": 5.0,    # 日内涨幅 >= 5% 时禁触 swing_bottom 看多
+
     # v0.5.5 新增:震荡市判断
     "choppy_window_pts":     10,     # 用最近 10 个价格点
     "choppy_ratio":          3.0,    # high-low / |总涨跌| > 3 = 震荡
+
+    # v0.5.21: 波峰/波谷接近预警
+    "near_resist_warn_pct":  3.0,    # 距阻力位 <3% → 卖出预警
+    "near_support_warn_pct": 3.0,    # 距支撑位 <3% → 买入预警
+    "near_warn_cooldown":    600,    # 接近预警冷却 10 分钟
+
+    # v0.5.21: 超买放量预警
+    "overbought_surge_rsi":  80,     # RSI 超买阈值
+    "overbought_surge_vol":  3.0,    # 量比超量阈值
+
+    # v0.5.21: 大幅上涨预警
+    "large_day_gain_pct":    10.0,   # 日内涨幅触发阈值
+
+    # v0.5.21: 多空转换确认 — 看空需要价格从近期高点回落此比例
+    "flip_short_confirm_pct": 2.0,
 }
 
 
@@ -167,42 +276,200 @@ def _recent_price_direction(session, ticker, window_pts: int = 5) -> Optional[st
 
 
 # ══════════════════════════════════════════════════════════════════
-#  触发器(profit_target / drawdown / swing 不变)
+#  v0.5.24 profit_target 重写 — 上下文感知止盈
 # ══════════════════════════════════════════════════════════════════
-def check_profit_target(session, ticker, params=None):
+def _profit_tier(pl_pct: float, params: dict) -> dict:
+    """根据浮盈% 返回 {tier, sell_ratio, tier_text}"""
+    t1 = params["profit_tier1_max_pct"]
+    t2 = params["profit_tier2_max_pct"]
+    t3 = params["profit_tier3_max_pct"]
+    if pl_pct < t1:
+        return {"tier": 1, "sell_ratio": 1/3, "tier_text": "考虑部分止盈"}
+    if pl_pct < t2:
+        return {"tier": 2, "sell_ratio": 0.5, "tier_text": "分批止盈半仓,剩余继续持有"}
+    if pl_pct < t3:
+        return {"tier": 3, "sell_ratio": 0.75, "tier_text": "止盈大部分,留小仓博后续"}
+    return {"tier": 4, "sell_ratio": 1.0, "tier_text": "强烈建议全部止盈,锁定利润"}
+
+
+def _is_making_new_high(session, ticker, window_sec: int) -> bool:
+    """最近 window_sec 内是否在创 session_high"""
+    try:
+        prices_ts = session.prices.get(ticker, [])
+        if not prices_ts:
+            return False
+        now = time.time()
+        recent = [(ts, p) for ts, p in prices_ts if (now - ts) <= window_sec]
+        if len(recent) < 3:
+            return False
+        sess_high = session.session_high.get(ticker, 0) or 0
+        if sess_high <= 0:
+            return False
+        # 最近 window 里有点触及 session_high (允许 0.05% 误差)
+        recent_max = max(p for _, p in recent)
+        return recent_max >= sess_high * 0.9995
+    except Exception:
+        return False
+
+
+def _is_trend_locked_long(session, max_age_sec: int = 1800) -> bool:
+    """最近 30 分钟内是否推过 long 方向的 direction_trend / target_advance"""
+    try:
+        state = getattr(session, "_target_state", {}) or {}
+        for ticker, st in state.items():
+            if (st.get("direction") == "long"
+                and (time.time() - (st.get("set_at_ts", 0) or 0)) <= max_age_sec):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def check_profit_target(session, ticker, indicators=None, params=None):
+    """
+    v0.5.24: 上下文感知止盈触发器。
+    返回 dict 时附带 data.sub_reason ∈ {near_target, broke_target,
+                                       overbought_surge, drawdown, near_stop}
+    及 data.tier (1/2/3/4) 供 pusher 文案分支使用。
+    """
     params = params or DEFAULT_PARAMS
     pos = session.get_position(ticker)
     if not pos or pos.get("qty", 0) <= 0:
         return None
 
-    pl_pct = pos.get("pl_pct", 0) or 0
+    qty    = pos.get("qty", 0)
+    cost   = pos.get("cost_price", 0) or 0
     pl_val = pos.get("pl_val", 0) or 0
+    pl_pct = pos.get("pl_pct", 0) or 0
+    current = session.get_last_price(ticker) or pos.get("current_price", 0) or 0
+    if current <= 0:
+        return None
 
-    if pl_val >= params["profit_target_usd"] or pl_pct >= params["profit_target_pct"]:
-        cool_key = f"profit_target_{ticker}"
-        if not session.can_trigger(cool_key, cooldown_sec=600):
-            return None
-        session.mark_triggered(cool_key)
+    # v0.5.26: in_loss 不再直接 return — 仅用作末尾过滤,
+    # 让 near_stop / drawdown 这两类风险告警在亏损时也能推出去。
+    fee_est = qty * params["profit_fee_per_share"] * 2   # 双边
+    in_loss = (pl_val < params["profit_min_pl_usd"]) or (pl_val - fee_est <= 0)
 
-        qty = pos.get("qty", 0)
-        cost = pos.get("cost_price", 0)
-        current = session.get_last_price(ticker) or pos.get("current_price", 0)
-        sell_price = round(current * 1.003, 2)
+    # ── 准备 T1 / stop (优先 _target_state,否则 cost±3% 兜底)
+    target_state = (getattr(session, "_target_state", {}) or {}).get(ticker) or {}
+    t1   = target_state.get("t1")   or (cost * 1.03 if cost else None)
+    stop = target_state.get("stop") or (cost * 0.97 if cost else None)
 
-        return {
-            "trigger": "profit_target_hit", "level": "URGENT", "style": "A",
-            "ticker": ticker, "direction": "neutral",
-            "strength": "STRONG" if pl_val >= 100 else "WEAK",
-            "data": {
-                "qty": qty, "cost": cost, "current": current,
-                "pl_val": pl_val, "pl_pct": pl_pct,
-                "sell_half_qty": int(qty / 2),
-                "sell_price_half": sell_price,
-                "stop_upgrade_to": round(cost * 1.002, 2),
-            },
-            "title": f"💰 {ticker.replace('US.','')} 浮盈达标",
-        }
-    return None
+    # ── 触发条件判定
+    sub_reason = None
+    # 接近 T1 < 1%
+    if t1 and t1 > 0:
+        dist_t1_pct = (t1 - current) / current * 100
+        if 0 <= dist_t1_pct < params["profit_near_t1_pct"]:
+            sub_reason = "near_target"
+        elif current >= t1:
+            sub_reason = "broke_target"
+
+    # RSI + 量比 (受"让利润奔跑"保护:趋势锁定+距 T1 远+创新高时不止盈)
+    # v0.5.25: 非当日 K 线时 RSI/vol_ratio 不可信,跳过此分支
+    if (sub_reason is None and indicators and indicators.get("data_ok")
+        and indicators.get("is_today", True)):
+        rsi = indicators.get("rsi_5m", 50) or 50
+        vol_ratio = indicators.get("vol_ratio", 1) or 1
+        if (rsi >= params["profit_overbought_rsi"]
+            and vol_ratio >= params["profit_overbought_vol"]):
+            # let_run:趋势锁多 + 距 T1 > 2% + 最近 5min 创新高 → 让利润奔跑
+            dist_t1_pct_now = ((t1 - current) / current * 100) if (t1 and t1 > 0) else 0
+            let_run = (
+                _is_trend_locked_long(session)
+                and dist_t1_pct_now > params["profit_let_run_dist_pct"]
+                and _is_making_new_high(session, ticker,
+                                        params["profit_let_run_new_high_window"])
+            )
+            if not let_run:
+                sub_reason = "overbought_surge"
+
+    # 从 peak 回撤
+    if sub_reason is None:
+        peak_dd = session.get_peak_drawdown_pct(ticker)
+        if peak_dd is not None and peak_dd <= -params["profit_drawdown_pct"]:
+            sub_reason = "drawdown"
+
+    # 接近 stop < 1%
+    if sub_reason is None and stop and stop > 0:
+        dist_stop_pct = (current - stop) / current * 100
+        if 0 <= dist_stop_pct < params["profit_near_stop_pct"]:
+            sub_reason = "near_stop"
+
+    if sub_reason is None:
+        return None  # 无触发条件命中
+
+    # v0.5.26: 盈利专属 sub_reason 在亏损状态下抑制
+    # (near_target / broke_target / overbought_surge 是"赚钱了该锁利润"语义,
+    #  亏损时推送语义不通;near_stop / drawdown 是"风险告警",必须放行)
+    if in_loss and sub_reason not in ("near_stop", "drawdown"):
+        return None
+
+    # ── 抑制 3: 持仓时间 < 30 分钟 (紧急条件全部豁免;此处所有 sub_reason 都算紧急)
+    # 设计取舍:所有 sub_reason 都是市场结构条件,出现即紧急,故全部豁免最短持仓限制
+    # 留 hold_seconds 给 pusher 做新仓位提示文案
+    hold_sec = session.get_position_age_sec(ticker)
+    if hold_sec is None:
+        hold_sec = 0
+    short_hold = hold_sec < params["profit_min_hold_sec"]
+
+    # ── 抑制 4: 让利润奔跑 (仅在"无任何紧急触发"时生效 — 但能进到这里说明已有触发)
+    # 例外:near_target / broke_target / overbought_surge / drawdown / near_stop 都不让奔跑
+    # 仅 drawdown 是被动信号,其余主动信号优先于"让奔跑"
+
+    # ── 冷却
+    cool_key = f"profit_target_{ticker}_{sub_reason}"
+    if not session.can_trigger(cool_key, cooldown_sec=600):
+        return None
+    session.mark_triggered(cool_key)
+
+    # ── 档位 → 卖出股数
+    tier_info = _profit_tier(pl_pct, params)
+    sell_qty = max(1, int(round(qty * tier_info["sell_ratio"])))
+    sell_qty = min(sell_qty, qty)
+    sell_price = round(current * (1.003 if sub_reason != "near_stop" else 0.998), 2)
+
+    # ── 标题
+    m = ticker.replace("US.", "")
+    sign = "+" if pl_pct >= 0 else ""
+    reason_title = {
+        "near_target":      f"接近 ${t1:.2f} 目标位" if t1 else "接近目标位",
+        "broke_target":     f"突破 ${t1:.2f} 目标位" if t1 else "突破目标位",
+        "overbought_surge": "超买放量",
+        "drawdown":         "从高点回落",
+        "near_stop":        f"接近 ${stop:.2f} 止损位" if stop else "接近止损位",
+    }[sub_reason]
+    title = f"💰 {m} {sign}{pl_pct:.1f}% · {reason_title}"
+
+    return {
+        "trigger": "profit_target_hit",
+        "level":   "URGENT",
+        "style":   "A",
+        "ticker":  ticker,
+        "direction": "neutral",
+        "strength": "STRONG" if pl_pct >= params["profit_tier2_max_pct"] else "WEAK",
+        "data": {
+            "qty":         qty,
+            "cost":        cost,
+            "current":     current,
+            "pl_val":      pl_val,
+            "pl_pct":      pl_pct,
+            "sub_reason":  sub_reason,
+            "tier":        tier_info["tier"],
+            "tier_text":   tier_info["tier_text"],
+            "sell_qty":    sell_qty,
+            "sell_ratio":  tier_info["sell_ratio"],
+            "sell_price":  sell_price,
+            "t1":          t1,
+            "stop":        stop,
+            "hold_seconds": int(hold_sec),
+            "short_hold":  short_hold,
+            "fee_est":     fee_est,
+            "true_pl":     pl_val - fee_est,
+            "stop_upgrade_to": round(cost * 1.002, 2) if cost else None,
+        },
+        "title": title,
+    }
 
 
 def check_drawdown_from_peak(session, ticker, params=None):
@@ -234,6 +501,14 @@ def check_drawdown_from_peak(session, ticker, params=None):
 def check_swing_top(session, ticker, indicators, params=None):
     params = params or DEFAULT_PARAMS
     if not indicators.get("data_ok"):
+        return None
+    # v0.5.25: 非当日 K 线(盘前/夜盘 RTH 缺失 fallback) 不触发
+    if not indicators.get("is_today", True):
+        return None
+
+    # v0.5.20: 强趋势过滤 — 日内涨幅 >= 5% 时不逆势触发看空
+    day_chg = _get_day_change(session, ticker)
+    if day_chg is not None and day_chg >= params["swing_top_strong_trend_pct"]:
         return None
 
     rsi = indicators.get("rsi_5m", 50) or 50
@@ -276,6 +551,14 @@ def check_swing_top(session, ticker, indicators, params=None):
 def check_swing_bottom(session, ticker, indicators, params=None):
     params = params or DEFAULT_PARAMS
     if not indicators.get("data_ok"):
+        return None
+    # v0.5.25: 非当日 K 线(盘前/夜盘 RTH 缺失 fallback) 不触发
+    if not indicators.get("is_today", True):
+        return None
+
+    # v0.5.25: 强趋势过滤 — 日内涨幅 >= 5% 时不逆势触发看多 ("已涨 8% 不存在底")
+    day_chg = _get_day_change(session, ticker)
+    if day_chg is not None and day_chg >= params["swing_bottom_strong_trend_pct"]:
         return None
 
     rsi = indicators.get("rsi_5m", 50) or 50
@@ -353,6 +636,17 @@ def check_direction_trend(session, ticker, indicators, params=None):
         # v0.5.18: 量比不足 0.8 = 无量回调,不视为真空头
         if vol_ratio is not None and vol_ratio < params.get("trend_vol_ratio_short_guard", 0.8):
             return None
+        # v0.5.21: 多空转换确认 — 价格必须从近20点高点回落 ≥ flip_short_confirm_pct
+        confirm_pct = params.get("flip_short_confirm_pct", 2.0)
+        prices_ts = session.prices.get(ticker, [])
+        if len(prices_ts) >= 5:
+            recent20 = [p for _, p in prices_ts[-20:]]
+            recent_high = max(recent20)
+            current_p   = recent20[-1]
+            if recent_high > 0:
+                drop_pct = (recent_high - current_p) / recent_high * 100
+                if drop_pct < confirm_pct:
+                    return None  # 未确认充分回落,不转空
         direction, emoji, word = "short", "📉", "看空"
     else:
         return None
@@ -462,10 +756,225 @@ def check_rapid_move(session, ticker, indicators=None, params=None):
                 "direction": direction_word,
                 "rsi": rsi,
                 "vol_ratio": vol_ratio,
+                "has_indicators": has_ind,  # v0.5.22: 便于复盘判断 RSI 是否实际可用
             },
             "title": f"⚡ {ticker.replace('US.','')} {direction_word} {chg:+.2f}%",
         }
     return None
+
+
+# ══════════════════════════════════════════════════════════════════
+#  v0.5.21 新触发器：接近阻力/支撑、超买放量、大幅上涨
+# ══════════════════════════════════════════════════════════════════
+def check_near_resistance(session, ticker, indicators, params=None):
+    """价格距阻力位 <3% → 推送准备卖出预警（不在 swing_top 强区域内）"""
+    params = params or DEFAULT_PARAMS
+    if not indicators.get("data_ok"):
+        return None
+    # v0.5.25: 非当日 K 线 不触发 (session_high/dist_high 是昨日数据)
+    if not indicators.get("is_today", True):
+        return None
+
+    dist_high = indicators.get("dist_high", 0) or 0
+    warn_pct  = -params.get("near_resist_warn_pct", 3.0)  # 负值：低于高点的%
+    strong_pct = params.get("near_high_pct_strong", -0.8)  # swing_top 强区域边界
+
+    # 在预警区（warn_pct <= dist_high < strong_pct）触发，已进入 swing_top 区域不重复
+    if not (warn_pct <= dist_high < strong_pct):
+        return None
+
+    session_high = indicators.get("session_high", 0)
+
+    # v0.5.22: 突破后自动上移阻力位 — session_high 未上移 ≥1% 不重复预警同一档阻力
+    if not hasattr(session, '_near_resist_last'):
+        session._near_resist_last = {}
+    last_resist = session._near_resist_last.get(ticker, 0)
+    if last_resist > 0 and session_high > 0 and session_high < last_resist * 1.01:
+        return None
+
+    cool_key = f"near_resist_{ticker}"
+    if not session.can_trigger(cool_key, cooldown_sec=params.get("near_warn_cooldown", 600)):
+        return None
+    session.mark_triggered(cool_key)
+    session._near_resist_last[ticker] = session_high  # 记录本次预警的阻力位
+
+    current  = session.get_last_price(ticker) or 0
+    dist_pct = abs(dist_high)
+
+    return {
+        "trigger": "near_resistance",
+        "level": "INFO", "style": "C",
+        "ticker": ticker,
+        "direction": "neutral",        # v0.5.22: 止盈提示，非看空信号
+        "action_intent": "avoid_chasing",
+        "strength": "WEAK",
+        "data": {
+            "current": current,
+            "resistance": session_high,
+            "dist_pct": dist_pct,
+            "day_change_pct": _get_day_change(session, ticker),
+        },
+        "title": f"⚠️ {ticker.replace('US.','')} 接近阻力位 还差 {dist_pct:.1f}%",
+    }
+
+
+def check_near_support(session, ticker, indicators, params=None):
+    """价格距支撑位 <3% → 推送准备买入预警（不在 swing_bottom 强区域内）"""
+    params = params or DEFAULT_PARAMS
+    if not indicators.get("data_ok"):
+        return None
+    # v0.5.25: 非当日 K 线 不触发 (session_low/dist_low 是昨日数据)
+    if not indicators.get("is_today", True):
+        return None
+
+    dist_low   = indicators.get("dist_low", 0) or 0
+    warn_pct   = params.get("near_support_warn_pct", 3.0)
+    strong_pct = params.get("near_low_pct_strong", 0.8)  # swing_bottom 强区域边界
+
+    # 在预警区（strong_pct < dist_low <= warn_pct）触发
+    if not (strong_pct < dist_low <= warn_pct):
+        return None
+
+    cool_key = f"near_support_{ticker}"
+    if not session.can_trigger(cool_key, cooldown_sec=params.get("near_warn_cooldown", 600)):
+        return None
+    session.mark_triggered(cool_key)
+
+    session_low = indicators.get("session_low", 0)
+    current     = session.get_last_price(ticker) or 0
+
+    return {
+        "trigger": "near_support",
+        "level": "INFO", "style": "C",
+        "ticker": ticker,
+        "direction": "long",
+        "strength": "WEAK",
+        "data": {
+            "current": current,
+            "support": session_low,
+            "dist_pct": dist_low,
+            "day_change_pct": _get_day_change(session, ticker),
+        },
+        "title": f"💡 {ticker.replace('US.','')} 接近支撑位 还差 {dist_low:.1f}%",
+    }
+
+
+def check_target_advance(session, ticker, indicators, params=None):
+    """
+    v0.5.23: 目标价升级检测
+      当前价突破上次推送的 T1（多头）或跌破上次推送的 T1（空头）→ 推 "📐 目标升级"
+      状态由 pusher._fmt_signal_with_conflict / _fmt_target_advance 在每次推目标时写入
+        session._target_state[ticker] = {direction, t1, t2, stop, set_at_price, set_at_ts}
+    冷却 60 秒；状态被自身推送时同步刷新，下一次升级以新 T1 为准
+    """
+    if not hasattr(session, '_target_state'):
+        return None
+    state = session._target_state.get(ticker)
+    if not state:
+        return None
+
+    cool_key = f"target_advance_{ticker}"
+    if not session.can_trigger(cool_key, cooldown_sec=60):
+        return None
+
+    cur_px = session.get_last_price(ticker) or 0
+    if cur_px <= 0:
+        return None
+
+    direction = state.get("direction", "long")
+    old_t1 = state.get("t1") or 0
+
+    broken = (direction == "long"  and old_t1 > 0 and cur_px > old_t1) or \
+             (direction == "short" and old_t1 > 0 and cur_px < old_t1)
+    if not broken:
+        return None
+
+    session.mark_triggered(cool_key)
+
+    return {
+        "trigger": "target_advance",
+        "level": "INFO", "style": "B",
+        "ticker": ticker,
+        "direction": direction,
+        "strength": "WEAK",
+        "data": {
+            "current":          cur_px,
+            "old_t1":           old_t1,
+            "old_t2":           state.get("t2"),
+            "old_stop":         state.get("stop"),
+            "old_set_at_price": state.get("set_at_price"),
+        },
+        "title": f"📐 {ticker.replace('US.','')} 突破 T1 目标升级",
+    }
+
+
+def check_overbought_surge(session, ticker, indicators, params=None):
+    """RSI > 80 + 量比 > 3x → 超买放量，强烈建议止盈"""
+    params = params or DEFAULT_PARAMS
+    if not indicators.get("data_ok"):
+        return None
+    # v0.5.25: 非当日 K 线 不触发 (RSI/vol_ratio 基于昨日数据,不可信)
+    if not indicators.get("is_today", True):
+        return None
+
+    rsi       = indicators.get("rsi_5m", 50) or 50
+    vol_ratio = indicators.get("vol_ratio", 1) or 1
+
+    rsi_thr = params.get("overbought_surge_rsi", 80)
+    vol_thr = params.get("overbought_surge_vol", 3.0)
+
+    if not (rsi >= rsi_thr and vol_ratio >= vol_thr):
+        return None
+
+    cool_key = f"overbought_surge_{ticker}"
+    if not session.can_trigger(cool_key, cooldown_sec=params.get("near_warn_cooldown", 600)):
+        return None
+    session.mark_triggered(cool_key)
+
+    return {
+        "trigger": "overbought_surge",
+        "level": "WARN", "style": "B",
+        "ticker": ticker,
+        "direction": "short",
+        "strength": "STRONG",
+        "data": {
+            "rsi": rsi,
+            "vol_ratio": vol_ratio,
+            "current": session.get_last_price(ticker),
+            "day_change_pct": _get_day_change(session, ticker),
+        },
+        "title": f"🔥 {ticker.replace('US.','')} 超买放量 RSI {rsi:.0f} 量比 {vol_ratio:.1f}x",
+    }
+
+
+def check_large_day_gain(session, ticker, params=None):
+    """日内涨幅 > 10% → 推送大幅上涨注意锁定利润"""
+    params = params or DEFAULT_PARAMS
+    day_chg = _get_day_change(session, ticker)
+    if day_chg is None:
+        return None
+
+    if day_chg < params.get("large_day_gain_pct", 10.0):
+        return None
+
+    cool_key = f"large_gain_{ticker}"
+    if not session.can_trigger(cool_key, cooldown_sec=1800):
+        return None
+    session.mark_triggered(cool_key)
+
+    return {
+        "trigger": "large_day_gain",
+        "level": "WARN", "style": "B",
+        "ticker": ticker,
+        "direction": "neutral",        # v0.5.22: 涨多止盈提示，非看空信号
+        "action_intent": "take_profit",
+        "strength": "WEAK",
+        "data": {
+            "day_change_pct": day_chg,
+            "current": session.get_last_price(ticker),
+        },
+        "title": f"🚀 {ticker.replace('US.','')} 大幅上涨 +{day_chg:.1f}% 注意锁定利润",
+    }
 
 
 def _get_day_change(session, ticker):
@@ -541,6 +1050,18 @@ def run_all_triggers(session, master_ticker, followers, indicators, params=None)
             if h:
                 hits.append(h)
 
+        # v0.5.21+: 接近阻力/支撑预警 + 超买放量预警 + (v0.5.23) 目标升级
+        for fn in (check_near_resistance, check_near_support, check_overbought_surge,
+                   check_target_advance):
+            h = fn(session, master_ticker, indicators, params)
+            if h:
+                hits.append(h)
+
+    # v0.5.21: 大幅上涨预警(不依赖 K 线指标,只需 day_chg)
+    h = check_large_day_gain(session, master_ticker, params)
+    if h:
+        hits.append(h)
+
     master_rapid = check_rapid_move(session, master_ticker, indicators, params)
     if master_rapid:
         hits.append(master_rapid)
@@ -560,11 +1081,47 @@ def run_all_triggers(session, master_ticker, followers, indicators, params=None)
                 continue
             hits.append(fh)
 
+    # v0.5.24: profit_target 扩展到 master + followers,master 传 indicators,follower 传 None
+    pt_master = check_profit_target(session, master_ticker, indicators, params)
+    if pt_master:
+        hits.append(pt_master)
     for tk in followers:
-        for fn in (check_profit_target, check_drawdown_from_peak):
-            h = fn(session, tk, params)
-            if h:
-                hits.append(h)
+        pt = check_profit_target(session, tk, None, params)
+        if pt:
+            hits.append(pt)
+        dd = check_drawdown_from_peak(session, tk, params)
+        if dd:
+            hits.append(dd)
+
+    # v0.5.24: 去重 — 若某 ticker 当前持仓且盈利覆盖,则 drawdown/overbought/near_resistance
+    # 已由 profit_target 接管,移除这些重复 hits 避免两条推送
+    pt_covered = {h["ticker"] for h in hits if h["trigger"] == "profit_target_hit"}
+    if pt_covered:
+        hits = [h for h in hits
+                if not (h["trigger"] in ("drawdown_from_peak", "overbought_surge",
+                                          "near_resistance", "large_day_gain")
+                        and h["ticker"] in pt_covered)]
+
+    # v0.5.25: 现金不足时静默"买入方向"信号,避免推送无法操作的噪声
+    # 已持仓的 ticker 不静默(可能加仓用 MIN_ADD_BUDGET_USD $500 门槛)
+    cash = getattr(session, "cash_available", None)
+    if cash is not None and cash < 2000:   # MIN_BUDGET_USD
+        BUY_DIR_TRIGGERS = ("swing_bottom", "near_support")
+        filtered = []
+        for h in hits:
+            is_buy_dir = (
+                h["trigger"] in BUY_DIR_TRIGGERS
+                or (h["trigger"] == "direction_trend" and h.get("direction") == "long")
+                or (h["trigger"] == "rapid_move"      and h.get("direction") == "long")
+            )
+            # 已持仓 ticker 走加仓门槛($500),不静默
+            pos = session.get_position(h["ticker"]) if hasattr(session, "get_position") else None
+            has_position = bool(pos and pos.get("qty", 0) > 0)
+            if is_buy_dir and not has_position:
+                print(f"  [swing] silenced {h['trigger']} {h['ticker']} (cash ${cash:.0f} < $2000)")
+                continue
+            filtered.append(h)
+        hits = filtered
 
     level_order    = {"URGENT": 0, "WARN": 1, "INFO": 2}
     strength_order = {"STRONG": 0, "WEAK": 1}

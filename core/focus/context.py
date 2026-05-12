@@ -1,13 +1,24 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — context.py
-  VERSION : v0.5.2
-  DATE    : 2026-04-22
+  VERSION : v0.5.4
+  DATE    : 2026-05-13
   CHANGES :
-    - [NEW] cash_available 字段:从 Futu 账户查到的真实可用现金
-    - [NEW] cash_fetched_at:可用现金最后更新时间
-    - [NEW] last_any_trigger_ts:全局互斥计时,用于避免刷屏
-    - [NEW] first_data_ts:首次收到报价的时间戳,用于心跳显示运行时长
+    v0.5.4 (2026-05-13):
+      - [FIX] _update_peak_trough: 首次见 ticker 时强制初始化 peak/trough。
+              原写法 peak = .get(ticker, price) + if price > peak 永远不成立,
+              字典永不写入,get_peak_drawdown_pct() 一直返回 None,
+              drawdown_from_peak / profit_target(drawdown 分支) 全程哑火。
+              影响今晚 RKLX 跌 8% 期间无任何回撤推送的根因之一。
+    v0.5.3 (2026-05-12):
+      - [NEW] _position_open_time:Futu deal_list 拉到的精确开仓时间 (epoch)
+      - [NEW] _position_first_seen:首次在 snapshot 见到的 epoch (deal_list 兜底)
+              用于 profit_target v0.5.24 持仓时长判定
+    v0.5.2 (2026-04-22):
+      - [NEW] cash_available 字段:从 Futu 账户查到的真实可用现金
+      - [NEW] cash_fetched_at:可用现金最后更新时间
+      - [NEW] last_any_trigger_ts:全局互斥计时,用于避免刷屏
+      - [NEW] first_data_ts:首次收到报价的时间戳,用于心跳显示运行时长
   DEPENDS :
     (无)
   OWNER   : laoyang
@@ -50,6 +61,12 @@ class FocusSession:
         self.positions_snapshot = {}
         self.positions_fetched_at = 0
 
+        # v0.5.3: 持仓开仓时间 — profit_target v0.5.24 使用
+        # _position_open_time:  Futu deal_list 取到的精确 epoch (优先)
+        # _position_first_seen: focus session 首次见到该持仓的 epoch (兜底)
+        self._position_open_time:  dict = {}
+        self._position_first_seen: dict = {}
+
         self.last_trigger_time = {}
 
         self.loop_count    = 0
@@ -76,12 +93,20 @@ class FocusSession:
         self._update_peak_trough(ticker, price, now)
 
     def _update_peak_trough(self, ticker: str, price: float, ts: float):
-        peak = self.peak_price.get(ticker, price)
-        trough = self.trough_price.get(ticker, price)
-        if price > peak:
+        # v0.5.4: 首次见到 ticker 必须显式初始化 peak/trough,
+        # 否则 .get(default=price) + 'price > peak' 永远不成立 → 字典里永不写入,
+        # get_peak_drawdown_pct 始终返回 None → drawdown_from_peak / profit_target
+        # 的 drawdown 通道全程哑火 (已观察到 RKLX 跌 8% 期间未触发任何回撤推送)
+        if ticker not in self.peak_price:
             self.peak_price[ticker] = price
             self.peak_time[ticker]  = ts
-        if price < trough:
+        elif price > self.peak_price[ticker]:
+            self.peak_price[ticker] = price
+            self.peak_time[ticker]  = ts
+        if ticker not in self.trough_price:
+            self.trough_price[ticker] = price
+            self.trough_time[ticker]  = ts
+        elif price < self.trough_price[ticker]:
             self.trough_price[ticker] = price
             self.trough_time[ticker]  = ts
 
@@ -163,9 +188,43 @@ class FocusSession:
         return round((current - trough) / trough * 100, 2)
 
     # ── 持仓 ────────────────────────────────────
-    def update_positions(self, positions: dict):
-        self.positions_snapshot = positions or {}
-        self.positions_fetched_at = time.time()
+    def update_positions(self, positions):
+        # Futu SDK 偶发返回 list；无论调用方传什么类型，这里统一归一化为 dict
+        if isinstance(positions, list):
+            positions = {
+                p["ticker"]: p
+                for p in positions
+                if isinstance(p, dict) and "ticker" in p
+            }
+        positions = positions if isinstance(positions, dict) else {}
+        now = time.time()
+        # v0.5.3: 首次见到的持仓记录 first_seen；清仓则清理对应缓存
+        for tk in positions:
+            if tk not in self._position_first_seen:
+                self._position_first_seen[tk] = now
+        for tk in list(self._position_first_seen.keys()):
+            if tk not in positions:
+                self._position_first_seen.pop(tk, None)
+                self._position_open_time.pop(tk, None)
+        self.positions_snapshot = positions
+        self.positions_fetched_at = now
+
+    def get_position_age_sec(self, ticker: str):
+        """
+        v0.5.3: 持仓时长 (秒)。
+        优先返回 _position_open_time (deal_list)；
+        没有则返回 _position_first_seen (snapshot 首见) 的时长；
+        都没有则返回 None。
+        """
+        ts = self._position_open_time.get(ticker) or self._position_first_seen.get(ticker)
+        if not ts:
+            return None
+        return time.time() - ts
+
+    def set_position_open_time(self, ticker: str, ts: float):
+        """v0.5.3: focus_manager 拿到 deal_list 后回写"""
+        if ts and ts > 0:
+            self._position_open_time[ticker] = float(ts)
 
     def get_position(self, ticker: str) -> Optional[dict]:
         return self.positions_snapshot.get(ticker)
