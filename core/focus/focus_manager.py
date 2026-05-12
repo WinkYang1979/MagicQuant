@@ -1,9 +1,31 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — focus_manager.py
-  VERSION : v0.5.21
-  DATE    : 2026-05-11
+  VERSION : v0.5.27
+  DATE    : 2026-05-12
   CHANGES :
+    v0.5.27 (2026-05-12):
+      - [FIX] 开盘后 50 min has_indicators=False 黄金时段失明根治:
+              根因: v0.5.18 ET 当日过滤 + micro_indicators >=10 根门槛 互锁
+                    开盘头 50 min 当日 K < 10 根 → 所有指标走 default 兜底
+                    RSI/vol_ratio 本是滚动 N 周期统计,跨日反而稳,被错杀
+              修复 _fetch_5m_kline: 不再缩减 DataFrame, 只写 attrs.et_today
+                    + attrs.has_today_data, 由 calc_all_micro 分指标过滤
+              配套修改 micro_indicators.calc_all_micro:
+                · RSI/vol_ratio/candle 用全量 K (含昨日尾盘,≥15 根即可用)
+                · VWAP/session_high/low 用当日子集 (<3 根回退 current_price)
+                · 新增 vwap_ok 字段,is_today 语义保留
+              效果: 09:30 开盘瞬间 RSI/vol_ratio 立刻可用, no_indicators
+                    告警不再因开盘 50 min 空窗误推
+    v0.5.22 (2026-05-12):
+      - [NEW] 关键错误 Telegram 告警（不推普通 kline fetch error）:
+              · Futu 连接失败（含 "128" / "Context status bad"）
+              · K 线订阅失败（subscribe ret != 0）
+              · has_indicators 持续 10 分钟 False
+              · 连续 5 次 loop error（consecutive_errors 计数，成功即重置）
+              格式: ⚠️ 系统警告 / [类型] 详情 / 时间: HH:MM
+              同类告警 15 min 内不重复推（_tg_warn_last 节流）
+              _push_system_warning() 函数 + _send_tg_ref 模块级引用
     v0.5.21 (2026-05-11):
       - [NEW] 共享市场快照输出: _write_shared_market_snapshot()
               每轮主循环按市场时段节流写入 data/shared/market_snapshot.json
@@ -182,8 +204,8 @@ from .proactive_reminder import check_and_fire_reminders
 from .event_calendar import format_event_line
 
 
-FOCUS_MGR_VERSION = "v0.5.21"
-FOCUS_MGR_DATE    = "2026-05-11"
+FOCUS_MGR_VERSION = "v0.5.22"
+FOCUS_MGR_DATE    = "2026-05-12"
 
 # ── 全局单例 ─────────────────────────────────────────────
 _current_session: Optional[FocusSession] = None
@@ -499,6 +521,30 @@ _kline_archive_done_date = None   # 避免同一天重复归档
 _kl_subscribed: dict = {}         # {(ticker, subtype): last_subscribed_ts}，定期强制刷新
 _snapshot_last_write: float = 0.0  # v0.5.21 共享快照节流时间戳
 
+# v0.5.22 关键错误 TG 推送
+_send_tg_ref = None               # _focus_loop 启动时写入，供工具函数调用
+_tg_warn_last: dict = {}          # {warn_key: last_push_epoch}，同类告警节流
+_TG_WARN_INTERVAL = 15 * 60      # 同类告警最短间隔 15 min
+
+
+def _push_system_warning(warn_key: str, error_type: str, detail: str):
+    """推送关键系统警告到 Telegram；同类警告 15 min 内不重复推，避免刷屏。"""
+    global _tg_warn_last
+    now = time.time()
+    if now - _tg_warn_last.get(warn_key, 0) < _TG_WARN_INTERVAL:
+        return
+    _tg_warn_last[warn_key] = now
+
+    ts  = datetime.now().strftime("%H:%M")
+    msg = f"⚠️ 系统警告\n[{error_type}] {detail}\n时间: {ts}"
+    print(f"  [focus] SYS_WARN [{error_type}]: {detail}")
+
+    if _send_tg_ref:
+        try:
+            _send_tg_ref(msg)
+        except Exception as _e:
+            print(f"  [focus] _push_system_warning send failed: {_e}")
+
 # v0.5.19: push 回调时间戳 —— 每次 SDK 推送 K 线时更新，用于冻结检测
 _kl_push_ts: dict = {}           # {ticker: last_push_epoch}
 _kl_push_lock = threading.Lock()
@@ -558,38 +604,45 @@ def _archive_daily_klines(session, client):
         tickers = [session.master] + list(session.followers or [])
         success_count = 0
 
+        # v0.5.26: 同时归档 1m + 5m
+        kline_specs = [
+            ("1m", KLType.K_1M, 500),
+            ("5m", KLType.K_5M, 200),
+        ]
+
         for ticker in tickers:
-            try:
-                if not client._ensure_quote():
-                    continue
-                with client._quote_lock:
-                    ret, kl = client._quote_ctx.get_cur_kline(
-                        ticker, 500, KLType.K_1M, AuType.QFQ
-                    )
-                if ret != 0 or kl is None or len(kl) == 0:
-                    continue
+            for period_tag, ktype, n_bars in kline_specs:
+                try:
+                    if not client._ensure_quote():
+                        continue
+                    with client._quote_lock:
+                        ret, kl = client._quote_ctx.get_cur_kline(
+                            ticker, n_bars, ktype, AuType.QFQ
+                        )
+                    if ret != 0 or kl is None or len(kl) == 0:
+                        continue
 
-                # DataFrame → dict list 存 JSON
-                records = []
-                for _, row in kl.iterrows():
-                    records.append({
-                        "time_key": str(row.get("time_key", "")),
-                        "open":    float(row.get("open", 0)),
-                        "close":   float(row.get("close", 0)),
-                        "high":    float(row.get("high", 0)),
-                        "low":     float(row.get("low", 0)),
-                        "volume":  int(row.get("volume", 0)),
-                        "turnover": float(row.get("turnover", 0)),
-                    })
+                    # DataFrame → dict list 存 JSON
+                    records = []
+                    for _, row in kl.iterrows():
+                        records.append({
+                            "time_key": str(row.get("time_key", "")),
+                            "open":    float(row.get("open", 0)),
+                            "close":   float(row.get("close", 0)),
+                            "high":    float(row.get("high", 0)),
+                            "low":     float(row.get("low", 0)),
+                            "volume":  int(row.get("volume", 0)),
+                            "turnover": float(row.get("turnover", 0)),
+                        })
 
-                short_name = ticker.replace("US.", "")
-                out_path = os.path.join(archive_dir, f"kline_1m_{short_name}.json")
-                with open(out_path, "w", encoding="utf-8") as f:
-                    json.dump(records, f, ensure_ascii=False, indent=2)
-                success_count += 1
-                print(f"  [archive] saved {ticker} 1m klines ({len(records)} bars) → {out_path}")
-            except Exception as e:
-                print(f"  [archive] {ticker} failed: {e}")
+                    short_name = ticker.replace("US.", "")
+                    out_path = os.path.join(archive_dir, f"kline_{period_tag}_{short_name}.json")
+                    with open(out_path, "w", encoding="utf-8") as f:
+                        json.dump(records, f, ensure_ascii=False, indent=2)
+                    success_count += 1
+                    print(f"  [archive] saved {ticker} {period_tag} klines ({len(records)} bars) → {out_path}")
+                except Exception as e:
+                    print(f"  [archive] {ticker} {period_tag} failed: {e}")
 
         # 顺便存一份 session 快照(session 总结)
         try:
@@ -933,10 +986,18 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
     # v0.5.21 共享快照：跨迭代保留最后一次推送信号
     snapshot_last_signal: dict = {}
 
+    # v0.5.22 关键错误告警计数器
+    consecutive_errors    = 0
+    last_has_indicators_ts = time.time()   # 初始化为启动时，给足 10 min 预热
+
     # ── v0.5.6 关键:读 manual_mode ──
     manual_mode = getattr(session, "manual_mode", False)
 
     client = get_quote_client()
+
+    # v0.5.22: 保存 send_tg_fn 引用，供 _push_system_warning 使用
+    global _send_tg_ref
+    _send_tg_ref = send_tg_fn
 
     try:
         send_tg_fn(f"🎯 盯盘循环已启动 · {session.master.replace('US.','')}\n"
@@ -1012,6 +1073,19 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
                 # v0.5.9: 同步到全局,供 /ai_test 使用
                 global _indicators_cache_global
                 _indicators_cache_global = indicators_cache or {}
+                # v0.5.26: 挂到 session,供 pusher._log_trigger 写决策上下文
+                session._last_kline_cache = kline_cache
+                session._last_indicators_cache = indicators_cache
+
+            # v0.5.22: has_indicators 连续 10 min False → 系统警告
+            if indicators_cache.get("data_ok"):
+                last_has_indicators_ts = now
+            elif now - last_has_indicators_ts > 600:
+                _push_system_warning(
+                    "no_indicators", "指标长时间不可用",
+                    f"has_indicators 已持续 {int((now - last_has_indicators_ts) / 60)} 分钟为 False，"
+                    f"RSI/VWAP/量比 均使用默认值，信号质量差"
+                )
 
             if now - last_position_fetch >= POSITION_FETCH_INTERVAL:
                 positions = client.fetch_positions()
@@ -1021,6 +1095,18 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
                         print(f"  [focus] positions was list, converting to dict")
                         positions = {p["ticker"]: p for p in positions if "ticker" in p}
                     session.update_positions(positions)
+
+                    # v0.5.24: 拉一次当日成交,刷新还没缓存 open_time 的持仓
+                    missing = [tk for tk in positions
+                               if tk not in session._position_open_time]
+                    if missing:
+                        try:
+                            deals = client.fetch_today_deals()
+                            if deals:
+                                for tk, ts in deals.items():
+                                    session.set_position_open_time(tk, ts)
+                        except Exception as e:
+                            print(f"  [focus] fetch_today_deals failed: {e}")
                 last_position_fetch = now
 
             if now - last_cash_fetch >= CASH_FETCH_INTERVAL:
@@ -1207,10 +1293,24 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
                 trend_lock_ts=trend_lock_ts,
             )
 
+            consecutive_errors = 0  # v0.5.22: 成功完成一轮，重置连续错误计数
+
         except Exception as e:
             session.error_count += 1
+            consecutive_errors += 1
             print(f"  [focus] loop error: {e}")
             traceback.print_exc()
+            err_str = str(e).lower()
+            # v0.5.22: Futu 连接失败检测（连接数超128 / Context status bad）
+            if any(kw in err_str for kw in
+                   ("128", "context status", "status bad", "connection failed", "connect error")):
+                _push_system_warning("futu_conn", "Futu 连接失败", str(e)[:120])
+            # v0.5.22: 连续 5 次 loop error → 系统警告
+            if consecutive_errors >= 5:
+                _push_system_warning(
+                    "loop_errors", "连续循环错误",
+                    f"连续 {consecutive_errors} 次 loop error，最近: {str(e)[:80]}"
+                )
             if session.error_count % 5 == 0:
                 time.sleep(5)
 
@@ -1266,6 +1366,9 @@ def _fetch_5m_kline(client, ticker: str, num: int = 200):
                         print(f"  [focus] set_handler failed (non-fatal): {_he}")
             else:
                 print(f"  [focus] subscribe {ticker} K_5M failed (ret={ret_sub}): {err_sub}")
+                # v0.5.22: 订阅失败推系统警告
+                _push_system_warning("kline_sub", "K线订阅失败",
+                    f"{ticker} K_5M ret={ret_sub}: {str(err_sub)[:80]}")
                 # 订阅失败仍继续尝试 get_cur_kline（可能已在别处订阅）
 
         with client._quote_lock:
@@ -1328,15 +1431,23 @@ def _fetch_5m_kline(client, ticker: str, num: int = 200):
             print(f"  [focus] kline missing columns: {kl.columns.tolist()}")
             return None
 
-        # v0.5.18: 按 ET 日期过滤，只保留今日 K 线，防止跨日污染 VWAP/session_high/low
+        # v0.5.27: 不再缩减 DataFrame, 改为只写 attrs, 由 calc_all_micro 分指标过滤
+        #          根因: v0.5.18 一刀切过滤导致开盘头 50 min has_indicators=False
+        #                (当日 K < 10 根,RSI/vol_ratio 都走兜底,黄金时段错失信号)
+        #          解法: RSI/vol_ratio 用全量 K (跨日反而稳),VWAP 仍按当日子集
+        et_today       = datetime.now(ET).strftime("%Y-%m-%d")
+        has_today_data = True
+        n_today        = len(kl)
         if "time_key" in kl.columns:
-            et_today = datetime.now(ET).strftime("%Y-%m-%d")
-            kl_today = kl[kl["time_key"].astype(str).str.startswith(et_today)]
-            if len(kl_today) > 0:
-                kl = kl_today.reset_index(drop=True)
-                print(f"  [focus] kline filtered to {et_today} ET: {len(kl)} bars")
-            else:
-                print(f"  [focus] kline no bars for {et_today} ET, using full {len(kl)} bars (fallback)")
+            today_mask = kl["time_key"].astype(str).str.startswith(et_today)
+            n_today    = int(today_mask.sum())
+            has_today_data = n_today > 0
+        kl.attrs["et_today"]       = et_today
+        kl.attrs["has_today_data"] = has_today_data
+        if has_today_data:
+            print(f"  [focus] kline {len(kl)} bars total, today subset {n_today} bars (ET {et_today})")
+        else:
+            print(f"  [focus] kline {len(kl)} bars total, no today bars yet for {et_today} ET (pre-market/early open)")
 
         # v0.5.19: 每次成功必打印诊断行 —— bars / last_time_key / last_vol
         last_tk  = str(kl["time_key"].iloc[-1])  if "time_key" in kl.columns else "?"

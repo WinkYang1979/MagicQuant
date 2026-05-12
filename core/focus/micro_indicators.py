@@ -108,13 +108,26 @@ def detect_candle_pattern(open_: pd.Series, high: pd.Series,
 def calc_all_micro(kl_5m: pd.DataFrame, current_price: float) -> dict:
     """
     一次性计算所有微观指标
-    
+    v0.5.27 (2026-05-12): 解耦各指标数据要求,修开盘后 50 min has_indicators=False
+      - RSI / vol_ratio / candle: 用全量 K(含昨日尾盘),滚动周期跨日反而稳定
+      - VWAP / session_high/low: 用 et_today 当日子集(必须当日重置)
+      - data_ok = 全量 K ≥ 15 (RSI(14) 可用门槛,跟当日数据解耦)
+      - vwap_ok = 当日子集 ≥ 3 (VWAP 是否就绪,下游可选用)
+      - is_today = 当日子集非空 (兼容 v0.5.25 swing_top/bottom RTH skip)
+
+    Decouple per-indicator data requirements
+    Goal: RSI/vol/vwap available at open instead of waiting 50 min
+
     输入: 5 分钟 K 线 DataFrame (需要有 open/high/low/close/volume)
          当前实时价(可能比最后一根 K 线的 close 更新)
-    
+         DataFrame.attrs["et_today"] = "YYYY-MM-DD" (由 _fetch_5m_kline 写入,
+                                                   缺失时回退到 has_today_data 标记)
+
     输出: dict with all indicators
     """
-    if kl_5m is None or len(kl_5m) < 10:
+    # v0.5.27: 门槛从 <10 改为 <15 — RSI(14) 需要至少 15 根才稳定
+    # 全量 K 通常 ≥ 200 根,远超门槛;只有 Futu 异常或盘前刚启动时才会走兜底
+    if kl_5m is None or len(kl_5m) < 15:
         return {
             "rsi_5m":       50.0,
             "vwap":         current_price,
@@ -125,6 +138,8 @@ def calc_all_micro(kl_5m: pd.DataFrame, current_price: float) -> dict:
             "dist_low":     0.0,
             "candle":       None,
             "data_ok":      False,
+            "vwap_ok":      False,
+            "is_today":     False,
         }
 
     close = kl_5m["close"].astype(float)
@@ -133,22 +148,58 @@ def calc_all_micro(kl_5m: pd.DataFrame, current_price: float) -> dict:
     open_ = kl_5m["open"].astype(float)
     vol   = kl_5m["volume"].astype(float)
 
-    session_high = float(high.max())
-    session_low  = float(low.min())
+    # ── 全量 K 算 RSI / vol_ratio / candle (跨日 OK,更稳) ──
+    rsi       = calc_rsi_fast(close, 14)
+    vol_ratio = calc_volume_ratio_short(vol, 3, 10)
+    candle    = detect_candle_pattern(open_, high, low, close)
+
+    # ── 当日子集算 VWAP / session_high/low (必须当日重置,防跨日污染) ──
+    # 优先用 attrs.et_today + time_key 过滤;回退到 attrs.has_today_data (兼容老测试)
+    attrs    = getattr(kl_5m, "attrs", {}) or {}
+    et_today = attrs.get("et_today")
+
+    if et_today and "time_key" in kl_5m.columns:
+        today_mask = kl_5m["time_key"].astype(str).str.startswith(et_today)
+        kl_today   = kl_5m[today_mask]
+        is_today   = len(kl_today) > 0
+    else:
+        # 老测试路径:无 time_key 列,用 has_today_data 标记
+        is_today  = bool(attrs.get("has_today_data", True))
+        kl_today  = kl_5m if is_today else kl_5m.iloc[0:0]
+
+    n_today = len(kl_today)
+    vwap_ok = n_today >= 3
+
+    if vwap_ok:
+        vwap         = calc_vwap(kl_today)
+        session_high = float(kl_today["high"].astype(float).max())
+        session_low  = float(kl_today["low"].astype(float).min())
+    elif is_today:
+        # 当日 1-2 根:VWAP 不稳,用 current_price 兜底;但 high/low 可用
+        vwap         = current_price
+        session_high = float(kl_today["high"].astype(float).max())
+        session_low  = float(kl_today["low"].astype(float).min())
+    else:
+        # 当日无数据 (盘前/盘后):全部用 current_price 兜底
+        vwap         = current_price
+        session_high = current_price
+        session_low  = current_price
 
     dist_high = (current_price - session_high) / session_high * 100 if session_high else 0
     dist_low  = (current_price - session_low)  / session_low  * 100 if session_low else 0
 
     return {
-        "rsi_5m":       calc_rsi_fast(close, 14),
-        "vwap":         calc_vwap(kl_5m),
-        "vol_ratio":    calc_volume_ratio_short(vol, 3, 10),
+        "rsi_5m":       rsi,
+        "vwap":         round(float(vwap), 4),
+        "vol_ratio":    vol_ratio,
         "session_high": round(session_high, 4),
         "session_low":  round(session_low, 4),
         "dist_high":    round(dist_high, 2),   # 负数=离高点差多少%
         "dist_low":     round(dist_low, 2),    # 正数=离低点高多少%
-        "candle":       detect_candle_pattern(open_, high, low, close),
+        "candle":       candle,
         "data_ok":      True,
+        "vwap_ok":      vwap_ok,               # v0.5.27: VWAP 是否就绪
+        "is_today":     is_today,              # v0.5.25: 当日子集是否非空
     }
 
 
