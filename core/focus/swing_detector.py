@@ -1,9 +1,33 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — swing_detector.py
-  VERSION : v0.5.26
+  VERSION : v0.5.27
   DATE    : 2026-05-13
   CHANGES :
+    v0.5.27 (2026-05-13):
+      - [BUG] RKLX 全程亏损时推送"高点回落 -2.20% · 减仓控损"
+              根因:peak_price 用首次见到的价格初始化 ($71.21),从未超过
+              cost ($74.08),"高点回撤"语义不成立但触发器仍 fire。
+      - [FIX] check_drawdown_from_peak: 严格要求 pl_val>0 且 peak>cost
+              | drawdown_from_peak: strict pl_val>0 AND peak>cost
+              亏损持仓不再走"高点回撤"通道。
+      - [FIX] check_profit_target: drawdown sub_reason 前置 pl_val>0 +
+              peak>cost 检查;in_loss 直接 return None,把亏损完全交给
+              新的 check_stop_loss_warning。
+              | profit_target now strictly serves profitable positions
+      - [NEW] check_stop_loss_warning: 亏损持仓专用风险告警
+              · WARN  浮亏 >= stop_loss_loss_pct(2%)   → 接近止损
+              · URGENT 浮亏 >= stop_loss_breach_pct(3%) → 已破止损
+              · 减仓档位随亏损深度递增 (1/3 → 1/2 → 3/4 → 全清)
+              · sell_price = current × 0.998,确保成交
+              | dedicated trigger for losing positions, replaces the
+              misfiring profit_target.drawdown / drawdown_from_peak path
+      - [NEW] DEFAULT_PARAMS:
+              · stop_loss_loss_pct=2.0 / stop_loss_breach_pct=3.0
+              · stop_loss_cooldown_warn=900 / stop_loss_cooldown_breach=600
+      - [CHG] run_all_triggers: 调用 stop_loss_warning,加入去重 pt_covered
+              / sl_covered 集合,避免与 drawdown_from_peak/overbought_surge
+              /near_resistance/large_day_gain 重复推送。
     v0.5.26 (2026-05-13):
       - [FIX] check_profit_target: 亏损时也允许 near_stop / drawdown
               告警通过。之前 pl_val<$5 / 扣费后亏损 两个抑制把所有
@@ -140,6 +164,12 @@ DEFAULT_PARAMS = {
     "profit_near_t1_pct":           1.0,    # 距 T1 < 1% → near_target
     "profit_near_stop_pct":         1.0,    # 距 stop < 1% → near_stop
     "profit_drawdown_pct":          2.0,    # 从 peak 回撤 >= 2% → drawdown
+    # v0.5.27: 亏损持仓专用 stop_loss_warning
+    # | losing-position stop-loss warning thresholds
+    "stop_loss_loss_pct":           2.0,    # 浮亏 >= 2% 触发"接近止损"提醒
+    "stop_loss_breach_pct":         3.0,    # 浮亏 >= 3% 触发"已破止损"紧急
+    "stop_loss_cooldown_warn":      900,    # 接近止损冷却 15 分钟
+    "stop_loss_cooldown_breach":    600,    # 破位冷却 10 分钟
     "profit_overbought_rsi":        78,     # RSI >= 78 + vol >= 3x → overbought
     "profit_overbought_vol":        3.0,
     # 档位 (盈利百分比边界)
@@ -384,10 +414,16 @@ def check_profit_target(session, ticker, indicators=None, params=None):
             if not let_run:
                 sub_reason = "overbought_surge"
 
-    # 从 peak 回撤
-    if sub_reason is None:
+    # 从 peak 回撤 — v0.5.27: 严格要求"曾经有过浮盈"
+    # | strict drawdown requires peak>cost AND pl_val>0
+    # 否则 peak 只是亏损期间的最高反弹,"回撤"语义不通(用户反馈:
+    # RKLX 全程亏损时不该推"从高点回落 -2.20%",该走 stop_loss_warning)
+    if sub_reason is None and pl_val > 0:
         peak_dd = session.get_peak_drawdown_pct(ticker)
-        if peak_dd is not None and peak_dd <= -params["profit_drawdown_pct"]:
+        peak_price = session.peak_price.get(ticker) if hasattr(session, "peak_price") else None
+        if (peak_dd is not None
+            and peak_dd <= -params["profit_drawdown_pct"]
+            and peak_price is not None and cost > 0 and peak_price > cost):
             sub_reason = "drawdown"
 
     # 接近 stop < 1%
@@ -399,10 +435,10 @@ def check_profit_target(session, ticker, indicators=None, params=None):
     if sub_reason is None:
         return None  # 无触发条件命中
 
-    # v0.5.26: 盈利专属 sub_reason 在亏损状态下抑制
-    # (near_target / broke_target / overbought_surge 是"赚钱了该锁利润"语义,
-    #  亏损时推送语义不通;near_stop / drawdown 是"风险告警",必须放行)
-    if in_loss and sub_reason not in ("near_stop", "drawdown"):
+    # v0.5.27: 亏损持仓全部交给 check_stop_loss_warning 处理
+    # profit_target 顾名思义"利润目标",只服务浮盈语境
+    # | losing positions are fully delegated to check_stop_loss_warning
+    if in_loss:
         return None
 
     # ── 抑制 3: 持仓时间 < 30 分钟 (紧急条件全部豁免;此处所有 sub_reason 都算紧急)
@@ -473,7 +509,24 @@ def check_profit_target(session, ticker, indicators=None, params=None):
 
 
 def check_drawdown_from_peak(session, ticker, params=None):
+    """
+    v0.5.27: 高位回撤严格化 — 必须满足:
+      1) 持仓存在且 pl_val > 0 (曾经/正在浮盈)
+      2) peak_price > cost_price (peak 是真实盈利高点,非亏损期最高反弹)
+    亏损持仓走 check_stop_loss_warning,不走此通道。
+    | drawdown_from_peak now requires actual profit context;
+      losing positions are handled by stop_loss_warning instead.
+    """
     params = params or DEFAULT_PARAMS
+
+    pos = session.get_position(ticker) if hasattr(session, "get_position") else None
+    if not pos or (pos.get("pl_val", 0) or 0) <= 0:
+        return None
+    cost = pos.get("cost_price", 0) or 0
+    peak = session.peak_price.get(ticker) if hasattr(session, "peak_price") else None
+    if cost <= 0 or peak is None or peak <= cost:
+        return None
+
     drawdown = session.get_peak_drawdown_pct(ticker)
     if drawdown is None:
         return None
@@ -489,13 +542,109 @@ def check_drawdown_from_peak(session, ticker, params=None):
             "ticker": ticker, "direction": "neutral", "strength": "STRONG",
             "data": {
                 "current": session.get_last_price(ticker),
-                "peak": session.peak_price.get(ticker),
+                "peak": peak,
                 "drawdown_pct": drawdown,
-                "position": session.get_position(ticker),
+                "position": pos,
             },
             "title": f"🚨 {ticker.replace('US.','')} 高位回撤 {drawdown:.2f}%",
         }
     return None
+
+
+# ══════════════════════════════════════════════════════════════════
+#  v0.5.27 stop_loss_warning — 亏损持仓专用风险告警
+#  | dedicated risk alert for losing positions; replaces the old
+#  | profit_target.drawdown branch which mis-fires when pl_val < 0
+# ══════════════════════════════════════════════════════════════════
+def check_stop_loss_warning(session, ticker, params=None):
+    """
+    亏损持仓两档告警:
+      WARN   浮亏 >= stop_loss_loss_pct (2%)   → 接近止损,建议减仓 1/3
+      URGENT 浮亏 >= stop_loss_breach_pct (3%) → 已破止损,建议清仓或半仓
+    返回 dict 字段对齐 profit_target_hit,沿用 pusher 的减仓动作渲染。
+    """
+    params = params or DEFAULT_PARAMS
+
+    pos = session.get_position(ticker) if hasattr(session, "get_position") else None
+    if not pos or pos.get("qty", 0) <= 0:
+        return None
+
+    qty    = pos.get("qty", 0)
+    cost   = pos.get("cost_price", 0) or 0
+    pl_val = pos.get("pl_val", 0) or 0
+    pl_pct = pos.get("pl_pct", 0) or 0
+    current = session.get_last_price(ticker) or pos.get("current_price", 0) or 0
+    if cost <= 0 or current <= 0 or pl_val >= 0:
+        return None
+
+    loss_pct = abs(pl_pct)  # pl_pct < 0,这里取绝对值方便比较
+    if loss_pct < params["stop_loss_loss_pct"]:
+        return None
+
+    breached = loss_pct >= params["stop_loss_breach_pct"]
+    level    = "URGENT" if breached else "WARN"
+    cd       = params["stop_loss_cooldown_breach"] if breached else params["stop_loss_cooldown_warn"]
+    sub_kind = "breached" if breached else "approaching"
+
+    cool_key = f"stop_loss_{ticker}_{sub_kind}"
+    if not session.can_trigger(cool_key, cooldown_sec=cd):
+        return None
+    session.mark_triggered(cool_key)
+
+    # ── 止损位:优先 _target_state,否则 cost × 0.97 兜底
+    target_state = (getattr(session, "_target_state", {}) or {}).get(ticker) or {}
+    stop = target_state.get("stop") or round(cost * 0.97, 2)
+
+    # ── 减仓档位:亏损越深减得越多;breached 起步半仓
+    if loss_pct >= 8.0:
+        sell_ratio, tier_text = 1.0, "强烈建议立即清仓"
+    elif loss_pct >= 5.0:
+        sell_ratio, tier_text = 0.75, "减仓 3/4,留小仓观察"
+    elif breached:
+        sell_ratio, tier_text = 0.5, "已破止损,减仓半仓控损"
+    else:
+        sell_ratio, tier_text = 1/3, "接近止损,减仓 1/3 控损"
+    sell_qty   = max(1, int(round(qty * sell_ratio)))
+    sell_qty   = min(sell_qty, qty)
+    sell_price = round(current * 0.998, 2)   # 略低于现价,确保成交
+
+    fee_est = qty * params["profit_fee_per_share"] * 2
+
+    hold_sec = session.get_position_age_sec(ticker)
+    if hold_sec is None:
+        hold_sec = 0
+
+    m = ticker.replace("US.", "")
+    title_emoji = "🛑" if breached else "📉"
+    title_word  = "已破止损位" if breached else "接近止损位"
+    title = f"{title_emoji} {m} {pl_pct:.1f}% · {title_word}"
+
+    return {
+        "trigger":  "stop_loss_warning",
+        "level":    level,
+        "style":    "A",
+        "ticker":   ticker,
+        "direction": "neutral",
+        "strength": "STRONG" if breached else "WEAK",
+        "data": {
+            "qty":         qty,
+            "cost":        cost,
+            "current":     current,
+            "pl_val":      pl_val,
+            "pl_pct":      pl_pct,
+            "stop":        stop,
+            "sub_kind":    sub_kind,        # approaching / breached
+            "loss_pct":    round(loss_pct, 2),
+            "sell_qty":    sell_qty,
+            "sell_ratio":  sell_ratio,
+            "sell_price":  sell_price,
+            "tier_text":   tier_text,
+            "hold_seconds": int(hold_sec),
+            "fee_est":     fee_est,
+            "true_pl":     pl_val - fee_est,
+        },
+        "title": title,
+    }
 
 
 def check_swing_top(session, ticker, indicators, params=None):
@@ -1082,25 +1231,34 @@ def run_all_triggers(session, master_ticker, followers, indicators, params=None)
             hits.append(fh)
 
     # v0.5.24: profit_target 扩展到 master + followers,master 传 indicators,follower 传 None
+    # v0.5.27: 新增 stop_loss_warning(亏损持仓专用,与 profit_target 互斥)
     pt_master = check_profit_target(session, master_ticker, indicators, params)
     if pt_master:
         hits.append(pt_master)
+    sl_master = check_stop_loss_warning(session, master_ticker, params)
+    if sl_master:
+        hits.append(sl_master)
     for tk in followers:
         pt = check_profit_target(session, tk, None, params)
         if pt:
             hits.append(pt)
+        sl = check_stop_loss_warning(session, tk, params)
+        if sl:
+            hits.append(sl)
         dd = check_drawdown_from_peak(session, tk, params)
         if dd:
             hits.append(dd)
 
     # v0.5.24: 去重 — 若某 ticker 当前持仓且盈利覆盖,则 drawdown/overbought/near_resistance
     # 已由 profit_target 接管,移除这些重复 hits 避免两条推送
+    # v0.5.27: stop_loss_warning 同样接管亏损持仓的所有派生触发器
     pt_covered = {h["ticker"] for h in hits if h["trigger"] == "profit_target_hit"}
-    if pt_covered:
+    sl_covered = {h["ticker"] for h in hits if h["trigger"] == "stop_loss_warning"}
+    if pt_covered or sl_covered:
         hits = [h for h in hits
                 if not (h["trigger"] in ("drawdown_from_peak", "overbought_surge",
                                           "near_resistance", "large_day_gain")
-                        and h["ticker"] in pt_covered)]
+                        and (h["ticker"] in pt_covered or h["ticker"] in sl_covered))]
 
     # v0.5.25: 现金不足时静默"买入方向"信号,避免推送无法操作的噪声
     # 已持仓的 ticker 不静默(可能加仓用 MIN_ADD_BUDGET_USD $500 门槛)

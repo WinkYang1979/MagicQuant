@@ -190,6 +190,13 @@ except ImportError as e:
 import urllib.request, urllib.parse, urllib.error
 from datetime import datetime
 
+# 看板模块（可选）/ Dashboard server (optional)
+try:
+    from core.dashboard_server import push_message as _dash_push, start_server as _dash_start
+    HAS_DASHBOARD = True
+except ImportError:
+    HAS_DASHBOARD = False
+
 # ── 路径 ──────────────────────────────────────────────────────────
 FETCHER      = os.path.join(BASE_DIR, "core", "signal_engine.py")
 USAGE_FILE   = os.path.join(BASE_DIR, "data", "usage.json")   # 费用统计文件
@@ -505,7 +512,14 @@ def call_openai(ticker: str, signal_data: dict) -> str:
     return ai_text.strip() + "\n\n" + cost_note
 
 def send_tg(text, buttons=None):
-    text = re.sub(r"<[^>]+>", "", str(text))
+    text_html = str(text)
+    if HAS_DASHBOARD:
+        try:
+            _dash_push(text_html, buttons=buttons)
+        except Exception:
+            pass
+
+    text = re.sub(r"<[^>]+>", "", text_html)
     text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
     chunks = [text[i:i+3500] for i in range(0, len(text), 3500)]
     for i, chunk in enumerate(chunks):
@@ -838,6 +852,17 @@ def refresh_positions_into_signals(signals: list) -> list:
         positions = get_quote_client().fetch_positions()
         if positions is None:
             print("  [realtime] positions fetch failed, keep JSON data")
+            return signals
+
+        # Futu SDK 偶发返回 list，归一为 dict（CLAUDE.md Futu 第 3 条）
+        if isinstance(positions, list):
+            positions = {
+                p["ticker"]: p
+                for p in positions
+                if isinstance(p, dict) and "ticker" in p
+            }
+        elif not isinstance(positions, dict):
+            print(f"  [realtime] positions unexpected type {type(positions).__name__}, skip")
             return signals
 
         # 先合并持仓到 signals
@@ -1216,6 +1241,32 @@ def cmd_detail(ticker_raw, force_refresh=False):
     pos   = s.get("position")
     sig_label = {"BUY": t("sig_buy"), "SELL": t("sig_sell"), "HOLD": t("sig_hold")}.get(sig, t("sig_unknown"))
 
+    # v0.5.22: 信心→仓位比例（与主信号推送对齐）
+    # 优先读 Focus session cash（无 API 调用），失败则用配置默认值
+    _detail_cash = None
+    try:
+        from core.focus.focus_manager import get_current_session as _gcs
+        _fs = _gcs()
+        if _fs and _fs.active and _fs.cash_available:
+            _detail_cash = float(_fs.cash_available)
+    except Exception:
+        pass
+    if not _detail_cash or _detail_cash <= 0:
+        from config.settings import ACCOUNT_SIZE
+        _detail_cash = float(ACCOUNT_SIZE)
+
+    conf = s.get("confidence", 0)
+    if conf >= 90:
+        _pos_pct, _pos_lbl = 0.90, "九成仓"
+    elif conf >= 80:
+        _pos_pct, _pos_lbl = 0.70, "七成仓"
+    elif conf >= 60:
+        _pos_pct, _pos_lbl = 0.40, "四成仓"
+    else:
+        _pos_pct, _pos_lbl = 0.30, "三成仓"
+    _pos_budget = _detail_cash * _pos_pct
+    _pos_qty    = int(_pos_budget / price) if price > 0 else 0
+
     lines = [
         t("detail_title", sig=sig_label.strip("[]【】"), ticker=ticker_short),
         "",
@@ -1258,8 +1309,9 @@ def cmd_detail(ticker_raw, force_refresh=False):
         f"目标1:   ${t1}  ({pct_from_price(price, t1) if t1 else '?'})  依据: {t1_mult}",
         f"目标2:   ${t2}  ({pct_from_price(price, t2) if t2 else '?'})  依据: {t2_mult}",
         f"风险/股: ${rps}  (当前价到止损的距离，即每股最大亏损)",
-        t("suggest_shares", n=s.get("suggested_shares", 0)),
-        f"  → 账户 5% 风险仓位: ${round(s.get('suggested_shares',0) * float(rps if rps != '?' else 0), 2):,.2f}",
+        f"仓位建议: 信心 {conf}% → {_pos_lbl} ({int(_pos_pct * 100)}%)",
+        f"  → 建议金额: ${_pos_budget:,.0f}  约 {_pos_qty} 股"
+        f"  (可用现金 ${_detail_cash:,.0f} × {int(_pos_pct * 100)}%)",
         "",
     ]
 
@@ -1955,16 +2007,17 @@ def cmd_positions():
         pl_pct    = pos.get("pl_pct", 0)
         mkt_val   = round(qty * cur_price, 2) if cur_price else round(qty * cost, 2)
         total_pl += pl_val
-        pl_sign = "+" if pl_val >= 0 else ""
-        emoji   = "📈" if pl_val >= 0 else "📉"
+        val_sign = "+" if pl_val >= 0 else ""
+        pct_sign = "+" if pl_pct >= 0 else ""
+        emoji    = "📈" if pl_val >= 0 else "📉"
         lines += [
             f"{emoji} {short_code}",
             f"  数量: {qty:.0f} 股  成本: ${cost:.2f}  现价: ${cur_price:.2f}",
             f"  市值: ${mkt_val:,.2f}",
-            f"  盈亏: {pl_sign}${pl_val:.2f} ({pl_sign}{pl_pct:.2f}%)",
+            f"  盈亏: {val_sign}${pl_val:.2f} ({pct_sign}{pl_pct:.2f}%)",
             "",
         ]
-    total_sign = "+" if total_pl >= 0 else ""
+    total_sign = "+" if total_pl >= 0 else "-"
     lines.append(f"━━━━━━━━━━━━")
     lines.append(f"总盈亏: {total_sign}${abs(total_pl):,.2f}")
     return "\n".join(lines)
@@ -2024,15 +2077,16 @@ def cmd_refresh():
             pl_pct    = pos.get("pl_pct", 0)
             mkt_val   = round(qty * cur_price, 2) if cur_price else round(qty * cost, 2)
             total_pl += pl_val
-            pl_sign   = "+" if pl_val >= 0 else ""
+            val_sign  = "+" if pl_val >= 0 else ""
+            pct_sign  = "+" if pl_pct >= 0 else ""
             emoji     = "📈" if pl_val >= 0 else "📉"
             lines += [
                 f"{emoji} {short_code}",
                 f"  {qty:.0f}股  成本 ${cost:.2f}  现价 ${cur_price:.2f}",
-                f"  市值 ${mkt_val:,.2f}  盈亏 {pl_sign}${pl_val:.2f} ({pl_sign}{pl_pct:.2f}%)",
+                f"  市值 ${mkt_val:,.2f}  盈亏 {val_sign}${pl_val:.2f} ({pct_sign}{pl_pct:.2f}%)",
                 "",
             ]
-        total_sign = "+" if total_pl >= 0 else ""
+        total_sign = "+" if total_pl >= 0 else "-"
         lines.append(f"总盈亏: {total_sign}${abs(total_pl):,.2f}")
     elif positions is not None:
         lines.append("当前空仓")
@@ -3278,9 +3332,182 @@ def scheduled_push(wl, push_type):
         threading.Thread(target=_ai_trade, daemon=True).start()
 
 
+# ════════════════════════════════════════════════════════════════
+#  启动时自动补跑 TradingAgents + 开盘简报 (v0.5.14, 2026-05-12)
+#  逻辑: 墨尔本时区判断今日，缺则补跑，已存在则跳过
+# ════════════════════════════════════════════════════════════════
+def _melbourne_today():
+    """墨尔本时区的今日 date 对象"""
+    from datetime import datetime as _dt, date as _date
+    try:
+        from zoneinfo import ZoneInfo
+        return _dt.now(ZoneInfo("Australia/Melbourne")).date()
+    except Exception:
+        return _date.today()
+
+
+def _last_us_trading_day_str() -> str:
+    """墨尔本今日 - 1，跳过周末，返回 YYYY-MM-DD"""
+    from datetime import timedelta
+    d = _melbourne_today() - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d.strftime("%Y-%m-%d")
+
+
+def _startup_briefing_worker():
+    """后台线程: 顺序补跑 TradingAgents → daily_briefing"""
+    from pathlib import Path
+    base = Path(r"C:\MagicQuant")
+    py_exe = sys.executable
+
+    # ── 1. TradingAgents 分析 ──────────────────────────
+    ta_date = _last_us_trading_day_str()
+    ta_report = (Path.home() / ".tradingagents" / "logs" / "RKLB"
+                 / ta_date / "reports" / "market_report.md")
+
+    if ta_report.exists():
+        print(f"  [startup] TradingAgents 报告已存在 ({ta_date})，跳过")
+    else:
+        print(f"  [startup] TradingAgents 报告缺失 ({ta_date})，开始分析...")
+        send_tg(f"🤖 启动检测: TradingAgents {ta_date} 缺失，后台开始分析...")
+        try:
+            r = subprocess.run(
+                [py_exe, str(base / "run_ta_daily.py")],
+                cwd=str(base), timeout=1800,
+            )
+            if r.returncode == 0:
+                print(f"  [startup] TradingAgents 完成 ({ta_date})")
+            else:
+                send_tg(f"⚠️ TradingAgents 退出码 {r.returncode}")
+        except subprocess.TimeoutExpired:
+            send_tg("⚠️ TradingAgents 超时 (30 min)，已终止")
+        except Exception as e:
+            send_tg(f"⚠️ TradingAgents 启动失败: {e}")
+
+    # ── 2. 开盘简报 ──────────────────────────────────
+    mel_today = _melbourne_today().strftime("%Y%m%d")
+    briefing_path = base / "data" / "briefing" / f"daily_{mel_today}.html"
+
+    if briefing_path.exists():
+        print(f"  [startup] 开盘简报已存在 ({mel_today})，跳过")
+    else:
+        print(f"  [startup] 开盘简报缺失 ({mel_today})，开始生成...")
+        try:
+            r = subprocess.run(
+                [py_exe, str(base / "root" / "daily_briefing.py")],
+                cwd=str(base), timeout=300,
+            )
+            if r.returncode == 0:
+                print(f"  [startup] 开盘简报完成 ({mel_today})")
+            else:
+                send_tg(f"⚠️ daily_briefing 退出码 {r.returncode}")
+        except subprocess.TimeoutExpired:
+            send_tg("⚠️ daily_briefing 超时 (5 min)，已终止")
+        except Exception as e:
+            send_tg(f"⚠️ daily_briefing 启动失败: {e}")
+
+
+# ── TradingAgents 周版本检查 ────────────────────────────────
+def _ta_version_check_due() -> bool:
+    """距上次检查 ≥ 7 天才执行"""
+    from pathlib import Path
+    cache = Path(r"C:\MagicQuant") / "data" / "ta_version_check.json"
+    if not cache.exists():
+        return True
+    try:
+        data = json.loads(cache.read_text(encoding="utf-8"))
+        return (time.time() - float(data.get("last_check_ts", 0))) >= 7 * 86400
+    except Exception:
+        return True
+
+
+def _ta_version_check_save(local_sha: str, upstream_sha: str):
+    from pathlib import Path
+    cache = Path(r"C:\MagicQuant") / "data" / "ta_version_check.json"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({
+        "last_check_ts": time.time(),
+        "last_check_at": datetime.now().isoformat(timespec="seconds"),
+        "local_sha":     local_sha,
+        "upstream_sha":  upstream_sha,
+        "up_to_date":    local_sha == upstream_sha,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _ta_version_check_worker():
+    """周检查 TradingAgents 上游版本。有更新只提醒，不自动拉取。"""
+    from pathlib import Path
+    if not _ta_version_check_due():
+        print("  [ta-version] 距上次检查 < 7 天，跳过")
+        return
+
+    ta_dir = Path(r"C:\MagicQuant") / "TradingAgents"
+    if not (ta_dir / ".git").exists():
+        print("  [ta-version] TradingAgents 非 git 仓库，跳过")
+        return
+
+    try:
+        local = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(ta_dir), capture_output=True, text=True, timeout=10,
+        )
+        if local.returncode != 0:
+            print(f"  [ta-version] 读取本地 HEAD 失败: {local.stderr.strip()}")
+            return
+        local_sha = local.stdout.strip()
+
+        upstream = subprocess.run(
+            ["git", "ls-remote", "origin", "main"],
+            cwd=str(ta_dir), capture_output=True, text=True, timeout=20,
+        )
+        if upstream.returncode != 0 or not upstream.stdout.strip():
+            print(f"  [ta-version] 读取上游失败: {upstream.stderr.strip()}")
+            return
+        upstream_sha = upstream.stdout.split()[0].strip()
+
+        _ta_version_check_save(local_sha, upstream_sha)
+
+        if local_sha == upstream_sha:
+            print(f"  [ta-version] 已是最新 ({local_sha[:7]})")
+            return
+
+        msg = (
+            f"📦 <b>TradingAgents 有新版本</b>\n"
+            f"本地: <code>{local_sha[:7]}</code>\n"
+            f"上游: <code>{upstream_sha[:7]}</code>\n\n"
+            f"升级命令:\n"
+            f"<code>cd C:\\MagicQuant\\TradingAgents</code>\n"
+            f"<code>git fetch &amp;&amp; git log HEAD..origin/main --oneline</code>\n"
+            f"<code>git pull &amp;&amp; uv sync</code>"
+        )
+        send_tg(msg)
+        print(f"  [ta-version] 提醒已发送 local={local_sha[:7]} upstream={upstream_sha[:7]}")
+    except subprocess.TimeoutExpired:
+        print("  [ta-version] git 命令超时")
+    except Exception as e:
+        print(f"  [ta-version] 异常: {e}")
+
+
+def _kick_startup_briefing_check():
+    """启动 daemon 线程跑补跑检查 + 周版本检查，bot 主循环不阻塞"""
+    threading.Thread(
+        target=_startup_briefing_worker,
+        daemon=True,
+        name="briefing-startup",
+    ).start()
+    threading.Thread(
+        target=_ta_version_check_worker,
+        daemon=True,
+        name="ta-version-check",
+    ).start()
+
+
 def main():
     global last_update_id
     print(get_logo())
+    if HAS_DASHBOARD:
+        _dash_start()
     wl = load_watchlist()
     print(f"  Watchlist: {all_tickers(wl)}")
     
@@ -3328,6 +3555,9 @@ def main():
     startup_lines.append("发送 /help 查看所有指令  ·  /modules 查看版本")
 
     send_tg("\n".join(startup_lines))
+
+    # ── 启动时补跑 TA + 开盘简报（墨尔本日期，已存在则跳过）─────
+    _kick_startup_briefing_check()
 
     # ── v0.5.9 开盘自动启动 Focus ──────────────────────────
     # v0.5.10: overnight 也自动启动,24h 盯盘闭环

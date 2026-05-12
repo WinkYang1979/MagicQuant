@@ -1,9 +1,19 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — pusher.py
-  VERSION : v0.5.28
+  VERSION : v0.5.29
   DATE    : 2026-05-13
   CHANGES :
+    v0.5.29 (2026-05-13):
+      - [NEW] _fmt_stop_loss_warning: 亏损持仓专用文案模板
+              · 标题:🛑 已破止损位 / 📉 接近止损位
+              · 关键指标行明示"原止损 $X 已击穿 N%" 或 "距现价 N%"
+              · leftover 兜底 hard_stop = stop if stop<current else current×0.98
+                解决"止损价高于现价"的逻辑矛盾
+              · 大白话解读:符合 CLAUDE.md 推送规范
+              | dedicated formatter for stop_loss_warning trigger
+              配合 swing_detector v0.5.27 — 亏损持仓走专用通道
+      - [CHG] format_trigger_message 路由新增 stop_loss_warning 分支
     v0.5.28 (2026-05-13):
       - [FIX] _fmt_profit_target: 亏损版文案
               · 标题 emoji: near_stop→🛑 / 其他亏损→📉 / 盈利→💰
@@ -1017,6 +1027,8 @@ def format_trigger_message(hit, session=None):
     trigger = hit["trigger"]
     if trigger == "profit_target_hit":
         result = _fmt_profit_target(hit, session)
+    elif trigger == "stop_loss_warning":
+        result = _fmt_stop_loss_warning(hit, session)
     elif trigger == "drawdown_from_peak":
         result = _fmt_drawdown(hit, session)
     elif trigger == "swing_top":
@@ -1331,6 +1343,114 @@ def _fmt_profit_target(hit, session=None):
         "qty": sell_qty, "price": sell_price,
         "reason": (f"{header_word} · 亏损 {pl_pct:.1f}%" if is_loss
                    else f"{header_word} · 浮盈 +{pl_pct:.1f}%"),
+    }
+    buttons = [
+        [{"text": f"📋 卖 {sell_qty}股", "callback_data": f"focus_order_{ticker_short}"}],
+        [{"text": "🧠 AI", "callback_data": f"focus_ai_{ticker_short}"},
+         {"text": "⏳ 忽略", "callback_data": "focus_ignore"}],
+    ]
+    return {"text": "\n".join(lines), "buttons": buttons, "style": "A"}
+
+
+# ══════════════════════════════════════════════════════════════════
+#  v0.5.29 stop_loss_warning — 亏损持仓专用文案
+#  | dedicated copy for stop_loss_warning trigger (losing positions)
+#  设计要点:
+#    1) 标题区分"接近止损 📉" vs "已破止损 🛑"
+#    2) 行动建议:亏损越深减仓越多
+#    3) leftover 兜底位用 min(stop, current×0.98),不会出现"高于现价的止损"
+# ══════════════════════════════════════════════════════════════════
+def _fmt_stop_loss_warning(hit, session=None):
+    d            = hit["data"]
+    ticker_short = hit["ticker"].replace("US.", "")
+    qty          = int(d.get("qty") or 0)
+    cost         = d.get("cost") or 0
+    current      = d.get("current") or 0
+    pl_val       = d.get("pl_val") or 0
+    pl_pct       = d.get("pl_pct") or 0
+    stop         = d.get("stop")
+    sub_kind     = d.get("sub_kind", "approaching")  # approaching / breached
+    tier_text    = d.get("tier_text", "减仓控损")
+    sell_qty     = int(d.get("sell_qty") or max(1, qty // 3))
+    sell_price   = d.get("sell_price") or round(current * 0.998, 2)
+    hold_sec     = int(d.get("hold_seconds") or 0)
+
+    # 精确手续费 (与 _fmt_profit_target 一致)
+    fee     = _estimate_roundtrip_fee(qty, current) if (qty and current) else 0
+    true_pl = pl_val - fee
+
+    breached = (sub_kind == "breached")
+
+    # ── 标题
+    title_emoji = "🛑" if breached else "📉"
+    title_word  = "已破止损位" if breached else "接近止损位"
+    title = f"{title_emoji} <b>{ticker_short} {pl_pct:.1f}% · {title_word}</b>"
+
+    # ── 持仓时长
+    hold_min = hold_sec // 60
+    if hold_min < 60:
+        hold_str = f"{hold_min} 分钟"
+    elif hold_min < 60 * 24:
+        hold_str = f"{hold_min // 60} 小时{hold_min % 60} 分"
+    else:
+        hold_str = f"{hold_min // (60 * 24)} 天"
+
+    # ── 关键指标行 (止损价 vs 现价关系明示)
+    detail = []
+    if stop and stop > 0:
+        if current < stop:
+            # 已破止损:现价已经在 stop 之下,明示"已击穿"
+            below_pct = (stop - current) / stop * 100
+            detail.append(f"原止损 ${stop:.2f} · 现价 {_money(current)} 已击穿 {below_pct:.2f}%")
+        else:
+            # 接近止损:current >= stop
+            gap_pct = (current - stop) / current * 100
+            detail.append(f"原止损 ${stop:.2f} · 距现价 {gap_pct:+.2f}%")
+    if cost and cost > 0:
+        detail.append(f"成本 {_money(cost)} → 现价 {_money(current)} (浮亏 {pl_pct:.2f}%)")
+
+    # ── 亏损不区分 pl_word
+    lines = [
+        title,
+        "━━━━━━━━━━━━━━",
+        f"{qty} 股 @{_money(cost)} → 现价 {_money(current)}",
+        f"目前亏损 ${abs(pl_val):.2f} ({pl_pct:.2f}%) · 持仓 {hold_str}",
+        f"手续费 ~${fee:.2f}  →  实际亏损 ${abs(true_pl):.2f}",
+    ]
+    if detail:
+        lines.extend(detail)
+    lines.append("")
+
+    # ── 动作建议
+    if sell_qty >= qty:
+        action_line  = f"🎯 <b>全仓清仓止损</b>:卖 {sell_qty} 股 @{_money(sell_price)}"
+        leftover_line = None
+    else:
+        action_line  = f"🎯 <b>{tier_text}</b>:卖 {sell_qty} 股 @{_money(sell_price)}"
+        leftover_qty = qty - sell_qty
+        # leftover 止损位:必须低于现价才有意义
+        # | leftover stop must be below current price to be actionable
+        if stop and stop > 0 and stop < current:
+            hard_stop = stop
+        else:
+            hard_stop = round(current * 0.98, 2)
+        leftover_line = f"剩 {leftover_qty} 股 · 若跌破 {_money(hard_stop)} 全清止损"
+
+    lines.append(action_line)
+    if leftover_line:
+        lines.append(leftover_line)
+
+    # ── 大白话解读 (CLAUDE.md 推送规范要求)
+    if breached:
+        why = "现价已跌破原止损位,纪律要求立即减仓控损,避免继续扩大亏损"
+    else:
+        why = "浮亏已接近止损区间,先减仓降低风险敞口,留小仓等反弹或彻底退出"
+    lines.append(f"💡 {why}")
+
+    LAST_PLAN_CACHE[ticker_short] = {
+        "action": "SELL", "ticker": ticker_short,
+        "qty": sell_qty, "price": sell_price,
+        "reason": f"{title_word} · 亏损 {pl_pct:.1f}%",
     }
     buttons = [
         [{"text": f"📋 卖 {sell_qty}股", "callback_data": f"focus_order_{ticker_short}"}],

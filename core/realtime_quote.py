@@ -1,9 +1,21 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant 慧投 — realtime_quote.py
-  VERSION : v0.5.4
-  DATE    : 2026-04-22
+  VERSION : v0.5.6
+  DATE    : 2026-05-13
   CHANGES :
+    v0.5.6 (2026-05-13):
+      - [FIX] fetch_positions: pl_val/pl_pct 强制 (current-cost)×qty 自算
+              原 broker pl_val 基于 cost_price(不含费),但显示用
+              average_cost(含费),口径不一致导致 alert 出现:
+                "@$74.08 浮盈 +$39 @ 现价 $73.47"  ← 数学不通
+              修复后 UI 数字内部一致;broker pl_val 的精细手续费摊销
+              口径放弃(影响极小,< $0.1/股)。
+              | force-recompute pl_val against displayed cost basis
+                so UI numbers stay internally consistent
+    v0.5.5 (2026-05-12):
+      - [NEW] fetch_today_deals() → {ticker: earliest_buy_epoch}
+              用于 profit_target v0.5.24 持仓时长判定
     v0.5.4 (2026-04-22):
       - [FIX] /account 的 total_assets / market_val 显示错误 bug
               v0.5.3 返回 HKD 聚合值($62,117),但字段含义是 USD
@@ -191,6 +203,22 @@ class QuoteClient:
     # focus_manager._fetch_5m_kline 用这个名字
     def _ensure_quote(self):
         return self._ensure()
+
+    def reconnect_quote(self) -> bool:
+        """
+        强制关闭并重建行情连接。
+        K 线推送流 TCP 层冻结时，仅重订阅无效，必须重建 OpenQuoteContext。
+        返回 True 表示重连成功。
+        """
+        print("  [Quote] 🔄 force reconnecting quote context ...")
+        with self._lock:
+            self._ctx = self._quote_ctx = None   # 让 _connect_quote 重建
+        ok = self._connect_quote()
+        if ok:
+            print("  [Quote] ✅ quote context reconnected")
+        else:
+            print("  [Quote] ❌ quote context reconnect failed")
+        return ok
 
     # ── 交易连接管理 ──────────────────────────────────────────────
     def _connect_trade(self):
@@ -595,16 +623,21 @@ class QuoteClient:
                 realized_pl   = _f("realized_pl", default=0.0)
                 position_side = _s("position_side", default="LONG")
 
-                # Moomoo AU 的 pl_ratio 直接是百分比(如 -41.37)
-                # 但老版可能用小数(-0.0087 = -0.87%),兜底转换
-                if 0 < abs(pl_pct) < 1:
-                    pl_pct = round(pl_pct * 100, 2)
-
-                # 兜底:如果没 pl_val 但有 current/cost,自算
-                if pl_val == 0 and current_price > 0 and cost_price > 0:
+                # v0.5.6: pl_val/pl_pct 强制用 (current-cost)×qty 自算覆盖 broker
+                # 原因:broker 的 pl_val 基于 cost_price(不含费),但我们显示用 average_cost
+                # (含费),口径不一致会导致 alert 出现 "@$74.08 浮盈 +$39 @现价 $73.47"
+                # 这种数学矛盾。统一以显示成本 (average_cost) 为基准,UI/数学一致优先。
+                # | force recompute pl_val/pl_pct against displayed cost (average_cost)
+                # to keep UI numbers internally consistent.
+                if current_price > 0 and cost_price > 0:
                     pl_val = round((current_price - cost_price) * qty, 2)
-                if pl_pct == 0 and current_price > 0 and cost_price > 0:
                     pl_pct = round((current_price - cost_price) / cost_price * 100, 2)
+                else:
+                    # 异常:无现价或成本时,fallback broker 值,做老版兜底转换
+                    if 0 < abs(pl_pct) < 1:
+                        pl_pct = round(pl_pct * 100, 2)
+                    if pl_pct != 0 and pl_val != 0 and ((pl_pct > 0) != (pl_val > 0)):
+                        pl_val = -pl_val
 
                 if qty > 0:
                     positions[ticker] = {
@@ -628,6 +661,48 @@ class QuoteClient:
             with self._trd_lock:
                 self._trd_ctx = None
                 self._trd_last_err_at = time.time()
+            return None
+
+    def fetch_today_deals(self) -> dict | None:
+        """
+        v0.5.5: 查当日成交,返回 {ticker: earliest_buy_epoch}。
+        仅 BUY 成交参与 — 每个 ticker 取当日最早一笔 BUY 的 create_time。
+        失败返回 None(调用方保留旧缓存)。
+        """
+        if not self._ensure_trade():
+            return None
+        try:
+            with self._trd_lock:
+                ret, data = self._trd_ctx.deal_list_query(trd_env=TrdEnv.REAL)
+            if ret != RET_OK or data is None or len(data) == 0:
+                return {}
+
+            earliest = {}
+            for _, row in data.iterrows():
+                code = str(row.get("code", "") or "")
+                if not code:
+                    continue
+                if not code.startswith("US."):
+                    code = "US." + code
+                side = str(row.get("trd_side", "") or "").upper()
+                if side not in ("BUY", "LONG"):
+                    continue
+                ts_str = str(row.get("create_time", "") or "")
+                if not ts_str:
+                    continue
+                # create_time 形如 "2026-05-12 09:31:42.123" — 解析为 epoch
+                try:
+                    ts_clean = ts_str.split(".")[0]
+                    dt = datetime.strptime(ts_clean, "%Y-%m-%d %H:%M:%S")
+                    epoch = dt.timestamp()
+                except Exception:
+                    continue
+                prev = earliest.get(code)
+                if prev is None or epoch < prev:
+                    earliest[code] = epoch
+            return earliest
+        except Exception as e:
+            print(f"  [Trade] fetch_today_deals error: {e}")
             return None
 
 
