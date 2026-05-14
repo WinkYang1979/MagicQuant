@@ -1,9 +1,21 @@
-"""
+﻿"""
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — focus_manager.py
-  VERSION : v0.5.27
-  DATE    : 2026-05-12
+  VERSION : v0.5.28
+  DATE    : 2026-05-14
   CHANGES :
+    v0.5.28 (2026-05-14):
+      - [FIX] 盘前 K 线冻结误报 hard reconnect:
+              根因: v0.5.19 只要 "交易时段(含 pre/post/overnight) + last_bar
+                    time_key 连续 3 次(90s)不变" 就 hard reconnect。
+                    但盘前本来就没有今日 K 线,last_bar 停在昨日收盘柱属正常,
+                    被误判为冻结,反复重建连接。且 90s 阈值短于一根 5m 柱周期。
+              修复: 冻结判定改为时间制 last_bar_change_ts。
+                    · 只有 market_status == "regular" 且 last_bar 超 10 min
+                      未推进 → 才算真冻结 → hard reconnect
+                    · 盘前/隔夜 last_bar 非今日柱 → 不算冻结,日志改为
+                      "盘前等待今日K线，上次收盘 $xx.xx",安静等待
+              kline_freeze_count(计数制)替换为 last_bar_change_ts(时间制)
     v0.5.27 (2026-05-12):
       - [FIX] 开盘后 50 min has_indicators=False 黄金时段失明根治:
               根因: v0.5.18 ET 当日过滤 + micro_indicators >=10 根门槛 互锁
@@ -975,7 +987,8 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
     last_market_status    = None
     last_trend_fire: dict = {}        # {"long": float, "short": float} 方向互斥时间戳
     last_bar_time_key     = None      # v0.5.19 冻结检测：上次最后一根柱的 time_key
-    kline_freeze_count    = 0         # v0.5.19 冻结检测：连续 time_key 未变次数
+    last_bar_change_ts    = time.time()  # v0.5.28 冻结检测：last_bar 最近一次推进的时刻
+    last_soft_resub_ts    = 0.0       # v0.5.31 冻结检测：上次软重订阅的时刻(防抖)
 
     # v0.5.20 趋势锁定状态
     trend_lock_dir        = None      # "long" / "short" / None
@@ -1002,7 +1015,7 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
     try:
         send_tg_fn(f"🎯 盯盘循环已启动 · {session.master.replace('US.','')}\n"
                    f"{format_market_status()}")
-    except:
+    except Exception:
         pass
 
     while not stop_event.is_set():
@@ -1042,27 +1055,45 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
                 if fetched is not None:
                     kline_cache = fetched          # 只有成功才覆盖
 
-                    # v0.5.19 冻结检测：比较最后一根柱的 time_key（取代 vol_sum）
-                    # vol_sum 误报原因：两次轮询落在同一根 5m 柱内时 vol_sum 天然不变
+                    # v0.5.28 冻结检测：比较最后一根柱的 time_key（取代 vol_sum / 计数）
+                    # 关键修正：盘前本来就没有今日 K 线，last_bar 停在昨日收盘柱
+                    # 属正常，不能当冻结去 hard reconnect。只有"盘中(RTH) +
+                    # last_bar 超过 10 min 没推进"才是真冻结，才重建连接。
                     cur_bar_tk = (str(fetched["time_key"].iloc[-1])
                                   if "time_key" in fetched.columns else None)
 
                     if cur_bar_tk and cur_bar_tk == last_bar_time_key:
-                        kline_freeze_count += 1
-                        # 仅在交易时段（pre/regular/post/overnight）才判定为冻结
-                        # closed 状态下 time_key 不变是正常的
-                        trading_now = (get_market_status() != "closed")
-                        if trading_now and kline_freeze_count >= 3:   # 3×30s = 90s
-                            print(f"  [focus] ⚠️ kline frozen {kline_freeze_count}x "
+                        stale_sec    = now - last_bar_change_ts
+                        et_today     = datetime.now(ET).strftime("%Y-%m-%d")
+                        bar_is_today = cur_bar_tk.startswith(et_today)
+
+                        if get_market_status() == "regular" and bar_is_today and stale_sec >= 600:
+                            # 盘中 last_bar 超 10 min 未推进 → 真冻结 → 强制重建连接
+                            print(f"  [focus] ⚠️ kline frozen {int(stale_sec)}s "
                                   f"(last_bar={cur_bar_tk} unchanged) "
                                   f"— hard reconnecting quote context")
                             # 清空订阅缓存，强制重建连接（不只是重订阅）
                             _kl_subscribed.clear()
                             client.reconnect_quote()
-                            kline_freeze_count = 0
+                            last_bar_change_ts = now   # 重连后重新计时，避免连环触发
+                        elif (get_market_status() == "regular" and bar_is_today
+                              and stale_sec >= 300 and now - last_soft_resub_ts >= 240):
+                            # v0.5.31: 盘中 last_bar 停 5 min(常见于开盘头几根 K 线
+                            # get_cur_kline 滞后)→ 先软重订阅推一把,不动连接;
+                            # 仍未恢复则到 600s 走上面的 hard reconnect。
+                            print(f"  [focus] kline stale {int(stale_sec)}s "
+                                  f"(last_bar={cur_bar_tk}) — forcing K_5M re-subscribe")
+                            _kl_subscribed.clear()
+                            last_soft_resub_ts = now
+                        elif not bar_is_today:
+                            # 盘前/隔夜：今日 K 线还没出，停在昨日收盘柱属正常，安静等待
+                            last_close = float(fetched["close"].iloc[-1])
+                            print(f"  [focus] 盘前等待今日K线，上次收盘 "
+                                  f"${last_close:.2f} (last_bar={cur_bar_tk})")
+                        # 其余情况（盘中未满 10 min / 盘后隔夜有今日柱）：静默等待
                     else:
-                        kline_freeze_count = 0
-                        last_bar_time_key = cur_bar_tk
+                        last_bar_time_key  = cur_bar_tk
+                        last_bar_change_ts = now
                 else:
                     print("  [focus] kline fetch returned None, retaining last cache")
                 last_kline_fetch = now
@@ -1272,7 +1303,7 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
                 try:
                     send_tg_fn(_build_heartbeat(session, indicators_cache))
                     last_heartbeat = now
-                except:
+                except Exception:
                     pass
 
             if _heartbeat_enabled and (now - last_heartbeat) >= HEARTBEAT_INTERVAL:
@@ -1335,7 +1366,7 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
     print(f"  [focus] loop stopped")
     try:
         send_tg_fn(f"✅ 盯盘循环已停止 · 共运行 {session.loop_count} 轮")
-    except:
+    except Exception:
         pass
 
 
@@ -1516,3 +1547,4 @@ def recompute_price(trigger_id):
 
 def is_us_market_open() -> bool:
     return is_market_open(strict=False)
+

@@ -1,9 +1,14 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — pusher.py
-  VERSION : v0.5.29
+  VERSION : v0.5.30
   DATE    : 2026-05-13
   CHANGES :
+    v0.5.30 (2026-05-13):
+      - [SYNC] 与 swing_detector v0.5.30 / focus_manager v0.5.30 一并发布
+              本次 pusher 无功能改动, 只刷 VERSION 常量与 SWING_VERSION
+              便于 triggers.json 复盘按统一版本标识对齐
+              | version bump only; aligns recorded swing_version/pusher_version
     v0.5.29 (2026-05-13):
       - [NEW] _fmt_stop_loss_warning: 亏损持仓专用文案模板
               · 标题:🛑 已破止损位 / 📉 接近止损位
@@ -102,8 +107,8 @@ import time
 from datetime import datetime
 from typing import Optional
 
-VERSION = "v0.5.28"
-SWING_VERSION = "v0.5.25"
+VERSION = "v0.5.31"
+SWING_VERSION = "v0.5.31"
 
 try:
     from .pairs import get_long_tools, get_short_tools, classify_follower
@@ -1211,6 +1216,7 @@ _PROFIT_SUB_REASON_WHY = {
     "near_target":      "目标位就在眼前,先锁部分盈利,剩余仓位等更高目标",
     "broke_target":     "已突破第一目标,建议止盈+上移止损至成本上方,锁定利润",
     "overbought_surge": "RSI + 放量过热,顶部风险大,先收一波利润再说",
+    "volume_dry":       "趋势量能明显枯竭,先保护利润,不要把浮盈还回去",
     "drawdown":         "高点回吐,趋势可能转弱,保住浮盈优先",
     "near_stop":        "止损位近在咫尺,无论如何先收回成本",
 }

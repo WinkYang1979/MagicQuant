@@ -1,9 +1,56 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — swing_detector.py
-  VERSION : v0.5.27
-  DATE    : 2026-05-13
+  VERSION : v0.5.31
+  DATE    : 2026-05-15
   CHANGES :
+    v0.5.31 (2026-05-15):
+      今晚复盘:23:00 开盘 18 条推送 + RSI<38 追空复发 + 开盘 K 线冻结
+      | tonight review: open-bell spam + oversold-short relapse + open freeze
+      - [FIX] check_rapid_move: 新增 RSI < rapid_move_rsi_oversold_guard(38)
+              时屏蔽 SHORT 急跌 — 与 check_direction_trend 的 oversold guard
+              对称。复盘 23:27 RSI34.7 / 23:42 RSI32.3 两次 rapid_move short
+              漏网,根因是 rapid_move 只有 RSI>70 的上侧 guard,缺下侧。
+              | rapid_move SHORT now also blocked when RSI < 38 (oversold);
+              | previously only the RSI>70 upper guard existed
+      - [FIX] check_target_advance: cool_key 由嵌入 T1 值改为按 ticker 全局
+              冷却 1800s — v0.5.30 的 per-T1 key 在 T1 随价格棘轮上移时
+              每次都是新 key,30min 冷却形同虚设(今晚 20min 内推 5 条)。
+              | per-ticker (not per-T1) 30-min cooldown; ratcheting T1 made
+              | the per-T1 key never collide
+      - [NEW] check_swing_bottom: 开盘第一小时(RTH 09:30-10:30 ET)内
+              swing_bottom 全局最多推 2 条,避免开盘震荡刷屏。
+              | swing_bottom capped at 2 alerts within first RTH hour
+      - [PARAMS] 新增 rapid_move_rsi_oversold_guard=38
+                  / swing_bottom_open_hour_max=2
+    v0.5.30 (2026-05-13):
+      昨夜复盘:6 小时 113 条推送 (37 rapid_move + 25 target_advance
+      + 22 drawdown_from_peak + 8 swing_top = 92 噪声) — 五连噪声抑制
+      | overnight review: 113 alerts in 6 hours (>80% noise); 5-fix noise gate
+      - [FIX] check_rapid_move: 无指标 (has_indicators=False) 时直接 return None
+              follower 现复用 master indicators 做 RSI/量比校验, 防止
+              follower 路径绕过新硬门 (原 follower 传 None 永远 has_ind=False)
+              | rapid_move now strictly requires has_indicators=True;
+              | followers inherit master indicators to keep coverage
+      - [FIX] check_target_advance: cooldown 60s → 1800s, cool_key 嵌入 T1 值
+              同一 T1 价位 30 min 内只推一次, 防止反复穿越同一目标价刷屏
+              | per-T1 30-min cooldown so the same target doesn't keep firing
+      - [FIX] check_drawdown_from_peak: drawdown_pct 0.8% → 2.0%, 冷却 300s
+              → 3600s 且嵌入 peak 值. 02:41-04:01 $114-117 震荡推 9 次的根因
+              是 0.8% 门槛配 5min 冷却太松, 小波动也算"高位回撤"
+              | 2% threshold + peak-keyed 1h cooldown; small chop no longer
+              | counts as a peak drawdown
+      - [FIX] check_swing_top: 新增硬门 RSI < swing_top_rsi_floor(70) → 拒绝
+              原 WEAK 路径 RSI>=58 即可触发, 58-62 区间是噪声重灾区
+              swing_top 语义应严格服务真超买 (>=70)
+              | swing_top now requires real overbought RSI (>=70)
+      - [NEW] run_all_triggers: 同标的 long↔short 反向方向 180s 内互斥
+              中性信号 (drawdown/stop_loss/near_resistance/large_day_gain)
+              不参与, 风险告警语义总是放行
+              | reverse-direction mutex for same ticker (3 min);
+              | neutral risk-warnings always pass through
+      - [PARAMS] drawdown_pct 0.8→2.0  /  新增 swing_top_rsi_floor=70
+                  / 新增 direction_reverse_mutex_sec=180
     v0.5.27 (2026-05-13):
       - [BUG] RKLX 全程亏损时推送"高点回落 -2.20% · 减仓控损"
               根因:peak_price 用首次见到的价格初始化 ($71.21),从未超过
@@ -150,6 +197,8 @@
 import time
 from typing import Optional
 
+from config.settings import MIN_ADD_BUDGET_USD, MIN_BUDGET_USD
+
 
 DEFAULT_PARAMS = {
     # v0.5.24: profit_target 完全重写 — 旧固定阈值删除
@@ -172,13 +221,21 @@ DEFAULT_PARAMS = {
     "stop_loss_cooldown_breach":    600,    # 破位冷却 10 分钟
     "profit_overbought_rsi":        78,     # RSI >= 78 + vol >= 3x → overbought
     "profit_overbought_vol":        3.0,
+    "trend_hold_day_gain_pct":      5.0,    # 强势趋势日内涨幅 / strong trend-day gain
+    "trend_hold_rsi_min":           50,
+    "trend_hold_rsi_max":           70,
+    "trend_hold_vol_min":           0.8,
+    "trend_hold_drawdown_pct":      3.0,
+    "trend_hold_vol_dry":           0.5,
+    "trend_lock_required_hits":     3,
+    "target_advance_trend_cooldown": 1200,
     # 档位 (盈利百分比边界)
     "profit_tier1_max_pct":         3.0,    # <3%   → 1/3 仓
     "profit_tier2_max_pct":         8.0,    # 3-8%  → 1/2 仓
     "profit_tier3_max_pct":         15.0,   # 8-15% → 3/4 仓
                                             # >15%  → 全仓
 
-    "drawdown_pct":         0.8,
+    "drawdown_pct":         2.0,   # v0.5.30: 0.8 → 2.0 — 小幅震荡不算回撤
 
     # v0.5.5: 快速异动阈值提高,冷却加长
     "rapid_move_pct":             1.0,    # master ticker (RKLB) 阈值 (v0.5.22: 0.8→1.0 降低噪音)
@@ -187,6 +244,7 @@ DEFAULT_PARAMS = {
     "rapid_move_cooldown":        1200,   # ← 600 → 1200 (20分钟)
     "rapid_move_reverse_cooldown": 180,   # v0.5.17: 反向信号最小间隔 180s
     "rapid_move_rsi_short_guard":  70,    # v0.5.17: RSI>70 时屏蔽 SHORT rapid_move
+    "rapid_move_rsi_oversold_guard": 38,  # v0.5.31: RSI<38 时屏蔽 SHORT rapid_move(超卖不追空)
 
     "rsi_overbought_strong": 65,
     "rsi_oversold_strong":   40,
@@ -212,11 +270,17 @@ DEFAULT_PARAMS = {
     "swing_cooldown_strong": 600,
 
     "global_mutex_sec":      60,
+    # v0.5.30: 同标的 long ↔ short 反向方向互斥窗口 (秒)
+    "direction_reverse_mutex_sec": 180,
 
     # v0.5.20: 强趋势过滤——日内涨幅超此值时禁触 swing_top 看空
     "swing_top_strong_trend_pct": 5.0,
+    # v0.5.30: swing_top 硬门 — RSI 必须 >= 此值才推 (默认 70,真超买)
+    "swing_top_rsi_floor":         70,
     # v0.5.25: 日内大涨/大跌时禁触反向 swing 信号
     "swing_bottom_strong_trend_pct": 5.0,    # 日内涨幅 >= 5% 时禁触 swing_bottom 看多
+    # v0.5.31: 开盘第一小时(RTH 首 60 min)swing_bottom 全局推送上限
+    "swing_bottom_open_hour_max":    2,
 
     # v0.5.5 新增:震荡市判断
     "choppy_window_pts":     10,     # 用最近 10 个价格点
@@ -249,6 +313,23 @@ def _global_mutex_ok(session, mutex_sec: int = 60) -> bool:
 
 def _mark_global_triggered(session):
     session.last_any_trigger_ts = time.time()
+
+
+def _minutes_since_rth_open():
+    """
+    v0.5.31: 距 RTH 09:30 ET 开盘的分钟数。
+    非盘中(盘前/盘后/夜盘/休市) → None;盘中首 60 min → 0~60。
+    """
+    try:
+        from datetime import datetime
+        from .market_clock import ET, get_market_status
+        if get_market_status() != "regular":
+            return None
+        now_et  = datetime.now(ET)
+        open_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        return (now_et - open_et).total_seconds() / 60.0
+    except Exception:
+        return None
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -355,6 +436,44 @@ def _is_trend_locked_long(session, max_age_sec: int = 1800) -> bool:
     return False
 
 
+def _record_strong_trend(session, ticker, direction, strength, params):
+    """记录连续强趋势 / Track consecutive strong trend signals."""
+    if direction != "long" or strength != "STRONG":
+        return
+    now = time.time()
+    hits = getattr(session, "_strong_trend_hits", [])
+    hits = [h for h in hits if now - h.get("ts", 0) <= 7200]
+    hits.append({"ts": now, "ticker": ticker, "direction": direction})
+    session._strong_trend_hits = hits
+    if len([h for h in hits if h.get("direction") == "long"]) >= params.get("trend_lock_required_hits", 3):
+        session._trend_hold_mode = {"direction": "long", "ticker": ticker, "locked_at": now}
+
+
+def _is_strong_trend_locked(session, params=None) -> bool:
+    params = params or DEFAULT_PARAMS
+    lock = getattr(session, "_trend_hold_mode", None) or {}
+    return (
+        lock.get("direction") == "long"
+        and time.time() - (lock.get("locked_at", 0) or 0) <= 7200
+    )
+
+
+def _is_strong_market(session, ticker, indicators, params=None) -> bool:
+    """强势行情: 日内涨幅>5%, RSI 50-70, 量比>0.8 / Strong trend-day regime."""
+    params = params or DEFAULT_PARAMS
+    if not indicators or not indicators.get("data_ok") or not indicators.get("is_today", True):
+        return False
+    day_chg = _get_day_change(session, ticker)
+    rsi = indicators.get("rsi_5m", 50) or 50
+    vol_ratio = indicators.get("vol_ratio", 1) or 1
+    return (
+        day_chg is not None
+        and day_chg > params.get("trend_hold_day_gain_pct", 5.0)
+        and params.get("trend_hold_rsi_min", 50) <= rsi <= params.get("trend_hold_rsi_max", 70)
+        and vol_ratio > params.get("trend_hold_vol_min", 0.8)
+    )
+
+
 def check_profit_target(session, ticker, indicators=None, params=None):
     """
     v0.5.24: 上下文感知止盈触发器。
@@ -384,15 +503,16 @@ def check_profit_target(session, ticker, indicators=None, params=None):
     target_state = (getattr(session, "_target_state", {}) or {}).get(ticker) or {}
     t1   = target_state.get("t1")   or (cost * 1.03 if cost else None)
     stop = target_state.get("stop") or (cost * 0.97 if cost else None)
+    trend_hold = _is_strong_trend_locked(session, params) or _is_strong_market(session, ticker, indicators, params)
 
     # ── 触发条件判定
     sub_reason = None
     # 接近 T1 < 1%
     if t1 and t1 > 0:
         dist_t1_pct = (t1 - current) / current * 100
-        if 0 <= dist_t1_pct < params["profit_near_t1_pct"]:
+        if (not trend_hold) and 0 <= dist_t1_pct < params["profit_near_t1_pct"]:
             sub_reason = "near_target"
-        elif current >= t1:
+        elif (not trend_hold) and current >= t1:
             sub_reason = "broke_target"
 
     # RSI + 量比 (受"让利润奔跑"保护:趋势锁定+距 T1 远+创新高时不止盈)
@@ -401,6 +521,8 @@ def check_profit_target(session, ticker, indicators=None, params=None):
         and indicators.get("is_today", True)):
         rsi = indicators.get("rsi_5m", 50) or 50
         vol_ratio = indicators.get("vol_ratio", 1) or 1
+        if trend_hold and vol_ratio < params.get("trend_hold_vol_dry", 0.5):
+            sub_reason = "volume_dry"
         if (rsi >= params["profit_overbought_rsi"]
             and vol_ratio >= params["profit_overbought_vol"]):
             # let_run:趋势锁多 + 距 T1 > 2% + 最近 5min 创新高 → 让利润奔跑
@@ -421,8 +543,9 @@ def check_profit_target(session, ticker, indicators=None, params=None):
     if sub_reason is None and pl_val > 0:
         peak_dd = session.get_peak_drawdown_pct(ticker)
         peak_price = session.peak_price.get(ticker) if hasattr(session, "peak_price") else None
+        drawdown_thr = params.get("trend_hold_drawdown_pct", 3.0) if trend_hold else params["profit_drawdown_pct"]
         if (peak_dd is not None
-            and peak_dd <= -params["profit_drawdown_pct"]
+            and peak_dd <= -drawdown_thr
             and peak_price is not None and cost > 0 and peak_price > cost):
             sub_reason = "drawdown"
 
@@ -472,6 +595,7 @@ def check_profit_target(session, ticker, indicators=None, params=None):
         "near_target":      f"接近 ${t1:.2f} 目标位" if t1 else "接近目标位",
         "broke_target":     f"突破 ${t1:.2f} 目标位" if t1 else "突破目标位",
         "overbought_surge": "超买放量",
+        "volume_dry":       "????",
         "drawdown":         "从高点回落",
         "near_stop":        f"接近 ${stop:.2f} 止损位" if stop else "接近止损位",
     }[sub_reason]
@@ -503,6 +627,7 @@ def check_profit_target(session, ticker, indicators=None, params=None):
             "fee_est":     fee_est,
             "true_pl":     pl_val - fee_est,
             "stop_upgrade_to": round(cost * 1.002, 2) if cost else None,
+            "trend_hold":   trend_hold,
         },
         "title": title,
     }
@@ -516,6 +641,12 @@ def check_drawdown_from_peak(session, ticker, params=None):
     亏损持仓走 check_stop_loss_warning,不走此通道。
     | drawdown_from_peak now requires actual profit context;
       losing positions are handled by stop_loss_warning instead.
+
+    v0.5.30: 回撤门槛 0.8% → 2.0%, 冷却 300s → 3600s 且嵌入 peak 值
+             — 02:41-04:01 价格 $114-117 震荡时今日推了 9 次的根因是
+               drawdown 0.8% 门槛配 5min 冷却太松, 小波动反复触发
+             | bumped drawdown threshold to 2% and added peak-keyed
+             | 1-hour cooldown so the same peak doesn't keep firing
     """
     params = params or DEFAULT_PARAMS
 
@@ -532,8 +663,9 @@ def check_drawdown_from_peak(session, ticker, params=None):
         return None
 
     if drawdown <= -params["drawdown_pct"]:
-        cool_key = f"drawdown_{ticker}"
-        if not session.can_trigger(cool_key, cooldown_sec=300):
+        # v0.5.30: cool_key 嵌入 peak 值, 同一峰值 1 hr 内只推一次
+        cool_key = f"drawdown_{ticker}_{peak:.4f}"
+        if not session.can_trigger(cool_key, cooldown_sec=3600):
             return None
         session.mark_triggered(cool_key)
 
@@ -581,7 +713,9 @@ def check_stop_loss_warning(session, ticker, params=None):
     if loss_pct < params["stop_loss_loss_pct"]:
         return None
 
-    breached = loss_pct >= params["stop_loss_breach_pct"]
+    target_state = (getattr(session, "_target_state", {}) or {}).get(ticker) or {}
+    stop = target_state.get("stop") or round(cost * 0.97, 2)
+    breached = loss_pct >= params["stop_loss_breach_pct"] or (stop > 0 and current < stop)
     level    = "URGENT" if breached else "WARN"
     cd       = params["stop_loss_cooldown_breach"] if breached else params["stop_loss_cooldown_warn"]
     sub_kind = "breached" if breached else "approaching"
@@ -592,9 +726,6 @@ def check_stop_loss_warning(session, ticker, params=None):
     session.mark_triggered(cool_key)
 
     # ── 止损位:优先 _target_state,否则 cost × 0.97 兜底
-    target_state = (getattr(session, "_target_state", {}) or {}).get(ticker) or {}
-    stop = target_state.get("stop") or round(cost * 0.97, 2)
-
     # ── 减仓档位:亏损越深减得越多;breached 起步半仓
     if loss_pct >= 8.0:
         sell_ratio, tier_text = 1.0, "强烈建议立即清仓"
@@ -661,6 +792,14 @@ def check_swing_top(session, ticker, indicators, params=None):
         return None
 
     rsi = indicators.get("rsi_5m", 50) or 50
+
+    # v0.5.30: RSI 必须 >= 70 (真超买) 才推波段顶
+    #          原 WEAK 路径 RSI>=58 + 反包 + 近高 三选二 → 在 RSI 58-62 区间噪声多
+    #          | swing_top now requires real overbought RSI (>=70);
+    #          | rules out the 58-62 noise band
+    if rsi < params.get("swing_top_rsi_floor", 70):
+        return None
+
     candle = indicators.get("candle") or {}
     vol_ratio = indicators.get("vol_ratio", 1) or 1
     dist_high = indicators.get("dist_high", 0) or 0
@@ -731,6 +870,22 @@ def check_swing_bottom(session, ticker, indicators, params=None):
     cool_key = f"swing_bottom_{ticker}_{strength}"
     if not session.can_trigger(cool_key, cooldown_sec=cd):
         return None
+
+    # v0.5.31: 开盘第一小时(RTH 首 60 min)swing_bottom 全局最多推 N 条,
+    #          避免开盘震荡刷屏(复盘 23:25-23:52 推了 3 条)。
+    mins_open = _minutes_since_rth_open()
+    if mins_open is not None and 0 <= mins_open <= 60:
+        from datetime import datetime
+        from .market_clock import ET
+        et_today = datetime.now(ET).strftime("%Y-%m-%d")
+        log = getattr(session, "_swing_bottom_open_log", None)
+        if not log or log.get("date") != et_today:
+            log = {"date": et_today, "count": 0}
+            session._swing_bottom_open_log = log
+        if log["count"] >= params.get("swing_bottom_open_hour_max", 2):
+            return None
+        log["count"] += 1
+
     session.mark_triggered(cool_key)
 
     return {
@@ -828,7 +983,7 @@ def check_direction_trend(session, ticker, indicators, params=None):
         return None
     session.mark_triggered(cool_key)
 
-    return {
+    hit = {
         "trigger": "direction_trend",
         "level": "WARN" if strength == "STRONG" else "INFO",
         "style": "B", "ticker": ticker,
@@ -845,12 +1000,18 @@ def check_direction_trend(session, ticker, indicators, params=None):
         },
         "title": f"{emoji} {ticker.replace('US.','')} 方向信号({word} {day_chg:+.2f}%)",
     }
+    _record_strong_trend(session, ticker, direction, strength, params)
+    return hit
 
 
 def check_rapid_move(session, ticker, indicators=None, params=None):
     """
     v0.5.5: 阈值 0.4% → 0.8%,冷却 600s → 1200s,加震荡市过滤
     v0.5.6: 从 indicators 读取 rsi_5m / vol_ratio,低量噪音压制
+    v0.5.30: has_indicators=False 时直接 return None — 指标盲态下 rapid_move
+             无法做量比/RSI 校验, 是 6 小时 37 条噪声的主要来源
+             | rapid_move now requires has_indicators=True; without
+             | RSI/vol_ratio gating it produces too many false alerts
     """
     params = params or DEFAULT_PARAMS
     chg = session.get_price_change_pct(ticker, params["rapid_move_window"])
@@ -864,18 +1025,25 @@ def check_rapid_move(session, ticker, indicators=None, params=None):
                       ratio=params["choppy_ratio"]):
             return None
 
-        # 读取 indicators
+        # v0.5.30: 强制要求 indicators 可用 — 无指标禁止推送
         has_ind = bool(indicators and indicators.get("data_ok"))
-        rsi = indicators.get("rsi_5m", 50) or 50 if has_ind else None
-        vol_ratio = indicators.get("vol_ratio", 1) or 1 if has_ind else None
+        if not has_ind:
+            return None
+        rsi = indicators.get("rsi_5m", 50) or 50
+        vol_ratio = indicators.get("vol_ratio", 1) or 1
 
         # 低量成交压制:成交量不足均量 80% 认为是噪音
-        if vol_ratio is not None and vol_ratio < 0.8:
+        if vol_ratio < 0.8:
             return None
 
         # v0.5.17: RSI 过高时屏蔽 SHORT 急跌(真实数据 RSI>70 SHORT 准确率 0%)
         rsi_short_guard = params.get("rapid_move_rsi_short_guard", 70)
-        if chg < 0 and rsi is not None and rsi > rsi_short_guard:
+        if chg < 0 and rsi > rsi_short_guard:
+            return None
+        # v0.5.31: RSI 过低时屏蔽 SHORT 急跌 — 超卖不追空,对称 trend_rsi_oversold_guard
+        #          (复盘 23:27 RSI34.7 / 23:42 RSI32.3 两次 rapid_move short 漏网)
+        rsi_oversold_guard = params.get("rapid_move_rsi_oversold_guard", 38)
+        if chg < 0 and rsi < rsi_oversold_guard:
             return None
 
         direction_key = "up" if chg > 0 else "down"
@@ -1014,16 +1182,16 @@ def check_target_advance(session, ticker, indicators, params=None):
       当前价突破上次推送的 T1（多头）或跌破上次推送的 T1（空头）→ 推 "📐 目标升级"
       状态由 pusher._fmt_signal_with_conflict / _fmt_target_advance 在每次推目标时写入
         session._target_state[ticker] = {direction, t1, t2, stop, set_at_price, set_at_ts}
-    冷却 60 秒；状态被自身推送时同步刷新，下一次升级以新 T1 为准
+    v0.5.30: 冷却由 60s → 1800s, 且 cool_key 嵌入 T1 值
+             — 同一 T1 价位 30 min 内只推一次, 防止价格在 T1 附近反复穿越刷屏
+             (今日 25 条 target_advance 中, 多数是同一 T1 反复触发)
+             | per-T1 30-min cooldown so the same target doesn't keep firing
+             | on every retest
     """
     if not hasattr(session, '_target_state'):
         return None
     state = session._target_state.get(ticker)
     if not state:
-        return None
-
-    cool_key = f"target_advance_{ticker}"
-    if not session.can_trigger(cool_key, cooldown_sec=60):
         return None
 
     cur_px = session.get_last_price(ticker) or 0
@@ -1032,10 +1200,29 @@ def check_target_advance(session, ticker, indicators, params=None):
 
     direction = state.get("direction", "long")
     old_t1 = state.get("t1") or 0
+    if old_t1 <= 0:
+        return None
 
-    broken = (direction == "long"  and old_t1 > 0 and cur_px > old_t1) or \
-             (direction == "short" and old_t1 > 0 and cur_px < old_t1)
+    broken = (direction == "long"  and cur_px > old_t1) or \
+             (direction == "short" and cur_px < old_t1)
     if not broken:
+        return None
+
+    trend_hold = direction == "long" and (
+        _is_strong_trend_locked(session, params)
+        or _is_strong_market(session, ticker, indicators, params)
+    )
+    if trend_hold:
+        trend_key = f"target_advance_trend_{ticker}"
+        if not session.can_trigger(trend_key, cooldown_sec=params.get("target_advance_trend_cooldown", 1200)):
+            return None
+        session.mark_triggered(trend_key)
+
+    # v0.5.31: 冷却键由 per-T1 改为 per-ticker 全局 1800s。
+    #          v0.5.30 的 per-T1 key 在 T1 随价格棘轮上移时每次都是新 key,
+    #          30min 冷却形同虚设(今晚 20min 内推 5 条 target_advance)。
+    cool_key = f"target_advance_{ticker}"
+    if not session.can_trigger(cool_key, cooldown_sec=1800):
         return None
 
     session.mark_triggered(cool_key)
@@ -1052,6 +1239,7 @@ def check_target_advance(session, ticker, indicators, params=None):
             "old_t2":           state.get("t2"),
             "old_stop":         state.get("stop"),
             "old_set_at_price": state.get("set_at_price"),
+            "trend_hold":        trend_hold,
         },
         "title": f"📐 {ticker.replace('US.','')} 突破 T1 目标升级",
     }
@@ -1222,15 +1410,20 @@ def run_all_triggers(session, master_ticker, followers, indicators, params=None)
         master_dir = trend_hit["direction"]
 
     # v0.5.17: follower 标的使用更高的 rapid_move 阈值(1.20%)
+    # v0.5.30: follower 复用 master indicators 做 RSI/量比校验, 解决 has_indicators
+    #          硬门后 follower(原传 None) 永不触发的副作用
+    #          | followers inherit master indicators so the new has_ind gate
+    #          | does not silence them entirely (master is the directional ref)
     follower_params = {**params, "rapid_move_pct": params.get("rapid_move_pct_follower", params["rapid_move_pct"])}
     for tk in followers:
-        fh = check_rapid_move(session, tk, None, follower_params)
+        fh = check_rapid_move(session, tk, indicators, follower_params)
         if fh:
             if master_dir and _is_linked(tk, fh["direction"], master_ticker, master_dir):
                 continue
             hits.append(fh)
 
-    # v0.5.24: profit_target 扩展到 master + followers,master 传 indicators,follower 传 None
+    # v0.5.24: profit_target 扩展到 master + followers
+    # v0.5.31: follower 复用 master indicators 判断强趋势持有模式
     # v0.5.27: 新增 stop_loss_warning(亏损持仓专用,与 profit_target 互斥)
     pt_master = check_profit_target(session, master_ticker, indicators, params)
     if pt_master:
@@ -1239,7 +1432,7 @@ def run_all_triggers(session, master_ticker, followers, indicators, params=None)
     if sl_master:
         hits.append(sl_master)
     for tk in followers:
-        pt = check_profit_target(session, tk, None, params)
+        pt = check_profit_target(session, tk, indicators, params)
         if pt:
             hits.append(pt)
         sl = check_stop_loss_warning(session, tk, params)
@@ -1263,7 +1456,7 @@ def run_all_triggers(session, master_ticker, followers, indicators, params=None)
     # v0.5.25: 现金不足时静默"买入方向"信号,避免推送无法操作的噪声
     # 已持仓的 ticker 不静默(可能加仓用 MIN_ADD_BUDGET_USD $500 门槛)
     cash = getattr(session, "cash_available", None)
-    if cash is not None and cash < 2000:   # MIN_BUDGET_USD
+    if cash is not None and cash < MIN_BUDGET_USD:
         BUY_DIR_TRIGGERS = ("swing_bottom", "near_support")
         filtered = []
         for h in hits:
@@ -1276,7 +1469,16 @@ def run_all_triggers(session, master_ticker, followers, indicators, params=None)
             pos = session.get_position(h["ticker"]) if hasattr(session, "get_position") else None
             has_position = bool(pos and pos.get("qty", 0) > 0)
             if is_buy_dir and not has_position:
-                print(f"  [swing] silenced {h['trigger']} {h['ticker']} (cash ${cash:.0f} < $2000)")
+                print(
+                    f"  [swing] silenced {h['trigger']} {h['ticker']} "
+                    f"(cash ${cash:.0f} < ${MIN_BUDGET_USD})"
+                )
+                continue
+            if is_buy_dir and has_position and cash < MIN_ADD_BUDGET_USD:
+                print(
+                    f"  [swing] silenced add-on {h['trigger']} {h['ticker']} "
+                    f"(cash ${cash:.0f} < ${MIN_ADD_BUDGET_USD})"
+                )
                 continue
             filtered.append(h)
         hits = filtered
@@ -1289,8 +1491,28 @@ def run_all_triggers(session, master_ticker, followers, indicators, params=None)
     ))
 
     if hits:
+        top = hits[0]
+        # v0.5.30: 3 min 同标的反向方向互斥 — long 推过 180s 内不再推 short, 反之亦然
+        #          中性 (neutral) 信号 (drawdown/stop_loss/near_resistance) 不参与互斥
+        #          | within 3 min, same-ticker opposite-direction signals are
+        #          | mutex'd; neutral risk-warnings always pass through
+        top_dir = top.get("direction")
+        if top_dir in ("long", "short"):
+            if not hasattr(session, "_last_directional_push"):
+                session._last_directional_push = {}
+            prev = session._last_directional_push.get(top["ticker"])
+            mutex_sec = params.get("direction_reverse_mutex_sec", 180)
+            if prev:
+                prev_dir, prev_ts = prev
+                elapsed = time.time() - prev_ts
+                if prev_dir != top_dir and elapsed < mutex_sec:
+                    print(f"  [swing] {top['trigger']} {top['ticker']} {top_dir} suppressed: "
+                          f"reverse mutex (prev {prev_dir} {int(elapsed)}s ago < {mutex_sec}s)")
+                    return []
+            session._last_directional_push[top["ticker"]] = (top_dir, time.time())
+
         _mark_global_triggered(session)
-        return [hits[0]]
+        return [top]
 
     return []
 
