@@ -1,9 +1,21 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — pusher.py
-  VERSION : v0.5.32
-  DATE    : 2026-05-15
+  VERSION : v0.5.33
+  DATE    : 2026-05-16
   CHANGES :
+    v0.5.33 (2026-05-16):
+      - [HOTFIX P0] _compute_rr: reward<0.5% of entry → return None
+              v0.5.32 P0#2 R/R 闸门把 swing_bottom 全部默默吃掉 —
+              2026-05-15 ET 全天 248 条 trigger 里 0 条 swing_bottom。
+              线上证据: [pusher] ⛔ swing_bottom US.RKLB R/R 0.00:1 < 1.5
+              根因: _calc_price_targets 在 ATR≈0 / 候选价 round(2) 落在
+              entry 边界时, t1 可能只比 entry 大一两分钱 → reward≈0 →
+              R/R≈0 → 被 < 1.5 闸门拦下。
+              修复: _compute_rr 检测 reward < entry × 0.5% 时返回 None
+              (按"没有可用目标"放行,不让闸门用无意义的 R/R 拦信号)。
+              触发时控制台打印 "R/R gate skipped: ..." 供线上诊断。
+              覆盖回归: tests/test_compute_rr_v0_5_33.py
     v0.5.32 (2026-05-15):
       - [NEW] P0 #3 RKLX/RKLZ 高位追多封顶 at _fmt_signal_with_conflict:
               follower ∈ {US.RKLX, US.RKLZ} + LONG + day_chg ≥ 10% →
@@ -121,8 +133,8 @@ import time
 from datetime import datetime
 from typing import Optional
 
-VERSION = "v0.5.32"
-SWING_VERSION = "v0.5.31"   # 同步至最近 swing_detector 实际版本
+VERSION = "v0.5.33"
+SWING_VERSION = "v0.5.33"   # 同步至最近 swing_detector 实际版本
 
 try:
     from .pairs import get_long_tools, get_short_tools, classify_follower
@@ -1625,6 +1637,16 @@ def _compute_rr(targets: dict, entry_price: float | None) -> float | None:
     """
     v0.5.32 P0 #2: 盈亏比 = abs(t1-entry) / abs(entry-stop)
     targets/entry 任一缺失或 stop=entry → 返回 None(放行,不参与闸门)
+
+    v0.5.33 P0: reward 距 entry < 0.5% 也返回 None。
+      根因: _calc_price_targets 在 ATR≈0 / 候选价 round(2) 落在 entry 边界时,
+            可能给出 t1 比 entry 大一两分钱。reward 几乎为 0 → R/R≈0.00 →
+            v0.5.32 P0#2 闸门 (rr<1.5) 把所有 swing_bottom 信号全部默默吃掉。
+            线上证据 2026-05-15 ET 全天 248 条 trigger 里 0 条 swing_bottom。
+      处理: 目标距 entry < 0.5% 时,R/R 不可信 — 当成"没有可用目标"放行,
+            不让闸门以无意义的 R/R 拦截 swing_bottom 这类有效底部信号。
+            | when target is within 0.5% of entry the R/R ratio is meaningless;
+            | treat as "no usable target" and bypass the gate.
     """
     if not targets or not entry_price:
         return None
@@ -1633,10 +1655,16 @@ def _compute_rr(targets: dict, entry_price: float | None) -> float | None:
     if not t1 or not stop:
         return None
     try:
-        risk = abs(float(entry_price) - float(stop))
+        entry = float(entry_price)
+        risk = abs(entry - float(stop))
         if risk <= 0:
             return None
-        reward = abs(float(t1) - float(entry_price))
+        reward = abs(float(t1) - entry)
+        # v0.5.33 P0: reward < 0.5% of entry → 目标距离无意义,放行不参与闸门
+        if reward < entry * 0.005:
+            print(f"  [pusher] R/R gate skipped: reward ${reward:.4f} < 0.5% of "
+                  f"entry ${entry:.2f} (t1={t1}, stop={stop}) — signal passes through")
+            return None
         return reward / risk
     except (TypeError, ValueError):
         return None
