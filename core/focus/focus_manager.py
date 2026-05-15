@@ -1,9 +1,23 @@
 ﻿"""
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — focus_manager.py
-  VERSION : v0.5.28
-  DATE    : 2026-05-14
+  VERSION : v0.5.32
+  DATE    : 2026-05-15
   CHANGES :
+    v0.5.32 (2026-05-15):
+      - [NEW] P0 #1 指标数值冻结检测器:
+              v0.5.28 的"bar time_key 不变"只能抓到 K 线推送流死掉,
+              抓不到"K 线在推但内容停滞"(RSI/vol_ratio 数值连续 5 次完全
+              相同)。本轮在 _focus_loop 末尾新增 indicator_signature
+              检测:
+                · (rsi_5m, vol_ratio) 取整后做 signature
+                · 连续 5 次相同(~150s @ 30s 拉取间隔)→ 标记 freeze
+                · 冻结时 (a) 阻止 filtered_hits 推送 (b) 推 TG 告警
+                  "⚠️ 指标冻结 X 分钟,信号已暂停" (c) 清 _kl_subscribed
+                  + client.reconnect_quote() 强制硬重连(限频 5 min)
+                · 数值变化后推 "✅ 指标恢复正常 · 冻结 X 分钟"
+              周期性重订阅 K_5M: KLINE_RESUB_INTERVAL=25 min 已存在,
+              每小时上限要求自动满足。
     v0.5.28 (2026-05-14):
       - [FIX] 盘前 K 线冻结误报 hard reconnect:
               根因: v0.5.19 只要 "交易时段(含 pre/post/overnight) + last_bar
@@ -562,6 +576,74 @@ _kl_push_ts: dict = {}           # {ticker: last_push_epoch}
 _kl_push_lock = threading.Lock()
 
 
+# ══════════════════════════════════════════════════════════════════
+#  v0.5.32 P0 #1: 指标"数值"冻结检测器
+# ══════════════════════════════════════════════════════════════════
+class IndicatorFreezeDetector:
+    """
+    检测 RSI + vol_ratio 数值连续 N 次完全相同 → 视为指标冻结。
+
+    State machine:
+      update(rsi, vol_ratio, now=None) → str:
+        "ok"              — 数值正常变化中
+        "freeze_started"  — 本次 update 首次进入冻结(连续 N 次相同)
+        "freeze_ongoing"  — 已在冻结中,数值仍未变
+        "recovered"       — 数值变化,从冻结状态恢复
+
+    阈值 N 默认 5(配 30s 拉取间隔 ≈ 150s 才告警),可注入便于测试。
+    """
+    def __init__(self, threshold: int = 5):
+        self.threshold = threshold
+        self.sig_last = None
+        self.sig_repeat = 0
+        self.frozen = False
+        self.freeze_started_ts = 0.0
+
+    @staticmethod
+    def _signature(rsi, vol_ratio):
+        try:
+            r = round(float(rsi), 2) if rsi is not None else None
+            v = round(float(vol_ratio), 4) if vol_ratio is not None else None
+        except (TypeError, ValueError):
+            return (None, None)
+        return (r, v)
+
+    def update(self, rsi, vol_ratio, now=None) -> str:
+        if now is None:
+            now = time.time()
+        sig = self._signature(rsi, vol_ratio)
+        if sig == (None, None):
+            # 数值不可用：不计入冻结判定，也不重置
+            return "ok"
+
+        if sig == self.sig_last:
+            self.sig_repeat += 1
+        else:
+            recovered = self.frozen
+            self.sig_last = sig
+            self.sig_repeat = 1
+            if recovered:
+                self.frozen = False
+                return "recovered"
+            return "ok"
+
+        if self.sig_repeat >= self.threshold:
+            if not self.frozen:
+                self.frozen = True
+                # 冻结起点 ≈ (threshold-1) 个采样周期前
+                self.freeze_started_ts = now
+                return "freeze_started"
+            return "freeze_ongoing"
+        return "ok"
+
+    def freeze_minutes(self, now=None) -> int:
+        if not self.frozen or self.freeze_started_ts == 0.0:
+            return 0
+        if now is None:
+            now = time.time()
+        return max(1, int((now - self.freeze_started_ts) / 60))
+
+
 class _KLinePushHandler(_KLHandlerBase):
     """
     v0.5.19: 注册到 OpenQuoteContext 的 K 线推送回调。
@@ -990,6 +1072,11 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
     last_bar_change_ts    = time.time()  # v0.5.28 冻结检测：last_bar 最近一次推进的时刻
     last_soft_resub_ts    = 0.0       # v0.5.31 冻结检测：上次软重订阅的时刻(防抖)
 
+    # v0.5.32 P0 #1 指标"数值"冻结检测：抓 RSI/vol_ratio 不变(独立于 bar 不变)
+    # | indicator-value freeze: RSI+vol_ratio identical for 5 consecutive ticks
+    indicator_freeze         = IndicatorFreezeDetector(threshold=5)
+    indicator_freeze_last_act = 0.0   # 上次硬重连时刻(限频 5 min)
+
     # v0.5.20 趋势锁定状态
     trend_lock_dir        = None      # "long" / "short" / None
     trend_lock_ts         = 0.0       # 锁定时刻 (epoch)
@@ -1107,6 +1194,57 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
                 # v0.5.26: 挂到 session,供 pusher._log_trigger 写决策上下文
                 session._last_kline_cache = kline_cache
                 session._last_indicators_cache = indicators_cache
+
+            # v0.5.32 P0 #1 指标数值冻结检测
+            # | Detect indicator-value freeze independent of bar-time freeze.
+            # K_5M push stream sometimes silently dies — bar advances but RSI/vol
+            # come back identical. 5 consecutive identical signatures (~150s @
+            # 30s fetch interval) trip the freeze gate.
+            if indicators_cache and indicators_cache.get("data_ok"):
+                _rsi_now = indicators_cache.get("rsi_5m")
+                _vol_now = indicators_cache.get("vol_ratio")
+                _state = indicator_freeze.update(_rsi_now, _vol_now, now=now)
+
+                if _state == "freeze_started":
+                    _rsi_disp = _rsi_now if _rsi_now is not None else "?"
+                    _vol_disp = (f"{_vol_now:.2f}"
+                                 if isinstance(_vol_now, (int, float)) else "?")
+                    print(f"  [focus] ⚠️ indicator value freeze "
+                          f"(RSI={_rsi_disp} vol={_vol_disp} ×5 identical) "
+                          f"— signal push paused, hard reconnecting")
+                    try:
+                        send_tg_fn(
+                            f"⚠️ 指标冻结 ~2 分钟,信号已暂停\n"
+                            f"RSI={_rsi_disp}  量比={_vol_disp}  连续 5 次未变化\n"
+                            f"\n"
+                            f"已强制重连 K_5M 订阅,数据恢复后会再推 ✅"
+                        )
+                    except Exception:
+                        pass
+                elif _state == "recovered":
+                    _frozen_min = indicator_freeze.freeze_minutes(now=now) or 1
+                    print(f"  [focus] ✅ indicators recovered (frozen ~{_frozen_min}min)")
+                    try:
+                        send_tg_fn(
+                            f"✅ 指标恢复正常\n"
+                            f"冻结约 {_frozen_min} 分钟,K线推送已重新工作\n"
+                            f"信号推送恢复"
+                        )
+                    except Exception:
+                        pass
+
+                # 冻结期间(含刚进入):每 5 min 重试一次硬重连
+                # | While frozen, retry hard reconnect at most every 5 min.
+                if indicator_freeze.frozen and (
+                    now - indicator_freeze_last_act >= 300
+                    or indicator_freeze_last_act == 0.0
+                ):
+                    _kl_subscribed.clear()
+                    try:
+                        client.reconnect_quote()
+                    except Exception as _e:
+                        print(f"  [focus] reconnect_quote failed: {_e}")
+                    indicator_freeze_last_act = now
 
             # v0.5.22: has_indicators 连续 10 min False → 系统警告
             if indicators_cache.get("data_ok"):
@@ -1275,6 +1413,14 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
 
                 else:
                     filtered_hits.append(hit)
+
+            # v0.5.32 P0 #1: 冻结期间所有信号一并禁推
+            # | All signals suppressed during indicator-value freeze.
+            if indicator_freeze.frozen and filtered_hits:
+                _trigs = ",".join(h.get("trigger", "?") for h in filtered_hits)
+                print(f"  [focus] ⏸ {len(filtered_hits)} signal(s) suppressed "
+                      f"(indicator freeze active): {_trigs}")
+                filtered_hits = []
 
             for hit in filtered_hits:
                 try:
