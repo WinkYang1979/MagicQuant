@@ -1425,6 +1425,10 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
             for hit in filtered_hits:
                 try:
                     msg = format_trigger_message(hit, session)
+                    # v0.5.32 P0 #2: msg=None 表示 pusher 闸门(R/R<1.5 等)阻断
+                    # | None means a pusher-side gate dropped this signal.
+                    if msg is None:
+                        continue
                     if send_tg_fn:
                         send_tg_fn(msg["text"], buttons=msg.get("buttons"))
                         session.push_count += 1

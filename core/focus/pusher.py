@@ -1,9 +1,17 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — pusher.py
-  VERSION : v0.5.30
-  DATE    : 2026-05-13
+  VERSION : v0.5.32
+  DATE    : 2026-05-15
   CHANGES :
+    v0.5.32 (2026-05-15):
+      - [NEW] P0 #2 盈亏比闸门 (R/R gate) at _fmt_signal_with_conflict:
+              · R/R = abs(t1-entry) / abs(entry-stop), 用 follower 域价位
+              · R/R < 1.5         → 直接 return None,信号被 format 阻断
+              · 1.5 ≤ R/R < 2.0   → 信心分上限 60(覆盖 _confidence_score 输出)
+              · R/R ≥ 2 / 缺失   → 正常推送
+              辅助函数 _compute_rr() + format_trigger_message 处理 None
+              焦点案例: 11:42 推送 +0.6% / -2.0% R/R=0.3 之类信号被堵在闸门外
     v0.5.30 (2026-05-13):
       - [SYNC] 与 swing_detector v0.5.30 / focus_manager v0.5.30 一并发布
               本次 pusher 无功能改动, 只刷 VERSION 常量与 SWING_VERSION
@@ -1057,6 +1065,11 @@ def format_trigger_message(hit, session=None):
     else:
         result = {"text": hit.get("title", "未知"), "buttons": None, "style": hit.get("style", "C")}
 
+    # v0.5.32 P0 #2: _fmt_signal_with_conflict 在 R/R<1.5 时返回 None,信号被堵
+    # | None means R/R gate (or other gate) blocked this signal — don't push.
+    if result is None:
+        return None
+
     manual = _manual_cmd_line(hit, session)
     result["text"] = _wrap_message(result["text"], session, hit.get("ticker"), manual)
 
@@ -1602,6 +1615,27 @@ def _calc_price_targets(session, ticker: str, direction: str, entry_price: float
     return result
 
 
+def _compute_rr(targets: dict, entry_price: float | None) -> float | None:
+    """
+    v0.5.32 P0 #2: 盈亏比 = abs(t1-entry) / abs(entry-stop)
+    targets/entry 任一缺失或 stop=entry → 返回 None(放行,不参与闸门)
+    """
+    if not targets or not entry_price:
+        return None
+    t1 = targets.get("t1")
+    stop = targets.get("stop")
+    if not t1 or not stop:
+        return None
+    try:
+        risk = abs(float(entry_price) - float(stop))
+        if risk <= 0:
+            return None
+        reward = abs(float(t1) - float(entry_price))
+        return reward / risk
+    except (TypeError, ValueError):
+        return None
+
+
 def _fmt_price_targets(targets: dict, direction: str, entry_price: float,
                        ticker: str = "") -> str:
     """
@@ -1642,16 +1676,49 @@ def _fmt_signal_with_conflict(hit, session, signal_direction, title_line, tech_l
     strength     = hit.get("strength", "WEAK")
     entry_price  = session.get_last_price(hit["ticker"]) if session else None
 
-    # v0.5.19: 信号强度进度条
+    # ── follower / 目标 ETF 选择(R/R 闸门用 follower 域价位) ──
+    target_etf = pick_target_follower(session, signal_direction) if session else None
+    follower_price = (session.get_last_price(target_etf)
+                      if (session and target_etf) else None)
+
+    # ── v0.5.28: 目标价分两域计算(提前到信心分前面以便算 R/R) ──
+    #   master 域: 给 check_target_advance(master_ticker) 使用 — 检测 master 突破
+    #   follower 域: 给推送显示和 follower 持仓的 profit_target 使用
+    master_targets = {}
+    if entry_price:
+        master_targets = _calc_price_targets(session, hit["ticker"], signal_direction, entry_price)
+    follower_targets = {}
+    if target_etf and follower_price:
+        follower_targets = _calc_price_targets(session, target_etf, signal_direction, follower_price)
+    # 显示给用户的 targets 必须用 follower 域(与 same_price 同域)
+    display_targets = follower_targets if follower_targets.get("t1") else master_targets
+    rr_entry = follower_price if follower_targets.get("t1") else entry_price
+
+    # ── v0.5.32 P0 #2: 盈亏比闸门 (R/R<1.5 完全禁推, 1.5-2 信心封顶 60) ──
+    # | Risk/reward gate: hard block <1.5; conf cap to 60 in [1.5, 2);
+    # | missing target/stop returns None from _compute_rr → pass through.
+    rr = _compute_rr(display_targets, rr_entry)
+    if rr is not None and rr < 1.5:
+        print(f"  [pusher] ⛔ {hit.get('trigger')} {hit['ticker']} "
+              f"R/R {rr:.2f}:1 < 1.5 — push blocked")
+        return None
+
+    # ── 信心分(R/R 1.5-2 → cap 60) ──
     conf = _confidence_score(hit)
+    if rr is not None and 1.5 <= rr < 2.0 and conf > 60:
+        print(f"  [pusher] {hit.get('trigger')} {hit['ticker']} "
+              f"R/R {rr:.2f}:1 ∈ [1.5,2) → conf {conf} → 60")
+        conf = 60
+
     conf_emoji = _confidence_emoji(conf)
     conf_line = f"{conf_emoji} 信心: {_strength_bar(conf)}"
+    if rr is not None:
+        conf_line += f"  ·  盈亏比 {rr:.1f}:1"
 
     # v0.5.20: 行情类型 + 方向偏向
     regime = _market_regime_label(hit)
     bias_word = "偏多" if signal_direction == "long" else "偏空" if signal_direction == "short" else "偏观望"
     intent    = _action_intent_label(conf, signal_direction)
-    target_etf = pick_target_follower(session, signal_direction) if session else None
     etf_hint   = target_etf.replace("US.", "") if target_etf else ""
     etf_part   = f"，适合{'做多' if signal_direction == 'long' else '做空'} {etf_hint}" if etf_hint else ""
     regime_line    = f"行情: {regime}"
@@ -1661,21 +1728,6 @@ def _fmt_signal_with_conflict(hit, session, signal_direction, title_line, tech_l
     lines += _trio_block(session)
     if tech_line:
         lines.append(tech_line)
-
-    # v0.5.28: 目标价分两域计算
-    #   master 域: 给 check_target_advance(master_ticker) 使用 — 检测 master 突破
-    #   follower 域: 给推送显示和 follower 持仓的 profit_target 使用 — 价位与入场域一致
-    # 此前用 master entry_price 算的 t1/t2/stop 被错标成 "RKLX 目标 T1 $XX",
-    # 导致止损 $119(RKLB域) 显示在 RKLX $75 入场价上方,永不触发。
-    master_targets = {}
-    if entry_price:
-        master_targets = _calc_price_targets(session, hit["ticker"], signal_direction, entry_price)
-
-    follower_price = (session.get_last_price(target_etf)
-                      if (session and target_etf) else None)
-    follower_targets = {}
-    if target_etf and follower_price:
-        follower_targets = _calc_price_targets(session, target_etf, signal_direction, follower_price)
 
     # 持久化两份目标态:master 用 master 价位、follower 用 follower 价位
     if session and not hasattr(session, '_target_state'):
@@ -1700,8 +1752,6 @@ def _fmt_signal_with_conflict(hit, session, signal_direction, title_line, tech_l
         }
 
     conflict = analyze_position_conflict(session, signal_direction)
-    # 显示给用户的 targets 必须用 follower 域 (与 same_price 同域),否则百分比/止损全错
-    display_targets = follower_targets if follower_targets.get("t1") else master_targets
     action   = _build_action_plan(session, signal_direction, strength, conflict,
                                   conf=conf, targets=display_targets)
 
