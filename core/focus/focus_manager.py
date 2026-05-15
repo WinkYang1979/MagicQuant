@@ -230,8 +230,8 @@ from .proactive_reminder import check_and_fire_reminders
 from .event_calendar import format_event_line
 
 
-FOCUS_MGR_VERSION = "v0.5.22"
-FOCUS_MGR_DATE    = "2026-05-12"
+FOCUS_MGR_VERSION = "v0.5.32"
+FOCUS_MGR_DATE    = "2026-05-15"
 
 # ── 全局单例 ─────────────────────────────────────────────
 _current_session: Optional[FocusSession] = None

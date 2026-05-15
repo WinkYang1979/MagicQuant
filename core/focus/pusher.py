@@ -121,8 +121,8 @@ import time
 from datetime import datetime
 from typing import Optional
 
-VERSION = "v0.5.31"
-SWING_VERSION = "v0.5.31"
+VERSION = "v0.5.32"
+SWING_VERSION = "v0.5.31"   # 同步至最近 swing_detector 实际版本
 
 try:
     from .pairs import get_long_tools, get_short_tools, classify_follower
