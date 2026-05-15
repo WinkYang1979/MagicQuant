@@ -12,7 +12,11 @@ import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 # 仅 import 类，不触发 focus_manager 启动副作用
-from core.focus.focus_manager import IndicatorFreezeDetector
+from core.focus import focus_manager as _fm  # noqa: E402
+from core.focus.focus_manager import IndicatorFreezeDetector  # noqa: E402
+
+# v0.5.33 P0: 生产线上 detector 已禁用; 单测打开 kill switch 测状态机逻辑
+_fm._IFD_DISABLED = False
 
 
 def test_changing_values_never_freeze():

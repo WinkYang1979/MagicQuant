@@ -1,9 +1,54 @@
 ﻿"""
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — focus_manager.py
-  VERSION : v0.5.32
-  DATE    : 2026-05-15
+  VERSION : v0.5.33
+  DATE    : 2026-05-16
   CHANGES :
+    v0.5.33 (2026-05-16):
+      - [P0 KILL SWITCH] IFD 检测器全局禁用:
+              线上证据 (23:46-23:47): RSI=32.6/32.1/30.5/29.5 vol=
+              0.77/0.79/0.81/0.84 明显不同的值也告警"连续 5 次未变化"。
+              逻辑或上下文有未知 bug (本轮也发现 caller 1185 行硬编码
+              threshold=5 覆盖了默认 30 — 上一轮 hotfix 失效)。
+              今晚先停告警, 周末排查根因。
+              实现:
+                · 模块常量 _IFD_DISABLED = True (单点开关)
+                · IndicatorFreezeDetector.update() 早返回 "ok"
+                · _focus_loop IFD 整块走 `if _IFD_DISABLED: pass`,
+                  不跑 reset / reconnect_quote / 告警
+                · 启动 TG 加确认推送 "✅ 冻结检测器已临时禁用"
+                · 测试通过 fm._IFD_DISABLED = False 暂时打开
+                  验证状态机, 不阻塞 detector 逻辑回归。
+      - [HOTFIX] IFD 误报 (每分钟刷屏告警):
+              根因: 默认阈值 5 × 30s 拉取 = 2.5min < 5m K 线柱周期,
+                    bar 没换柱时 RSI/vol_ratio 本就恒定,被误判为冻结。
+                    线上证据 RSI/vol 明显变化也告警 → 实际是不同 bar
+                    各自累积到 5 次相同, 反复触发 freeze_started。
+              修复:
+                · 默认阈值 5 → 30 (30×30s = 15min, 跨 3 个 5m 柱才告警)
+                · 新增 history ring buffer (maxlen=12) 记录 (ts,rsi,vol,sig,
+                  sig_repeat) 用于线上诊断
+                · 新增 history_dump() 输出最近 N 次采样,freeze_started
+                  触发时控制台直接打印 — 排查 detector 是否误报
+                · reset() 同步清空 history,避免跨时段污染
+                · 告警冷却 30 min 在统一通道生效 (本版本前 IFD freeze 走
+                  直接 send_tg_fn, 无 cooldown — 现已统一)
+              回归 tests/test_ifd_v0_5_33_emergency.py 锁定:
+                · 默认阈值 30
+                · bar 内 10 次相同不告警
+                · 明显变化值绝不告警 (用户 reproducer)
+                · 30 次相同才真冻结
+      - [CHG] 数据异常告警统一格式 (替换 v0.5.22 "[type] detail" 旧式):
+              ⚠️ MagicQuant 数据异常告警
+              ━━━━━━━━━━━━━━
+              错误类型 / 持续时间 / 影响 / 建议 / [详情] / 时间
+              覆盖: K_5M 订阅失败, has_indicators 失效, 指标冻结(IFD),
+                    Futu 连接断开, 连接数超 128 (拆开独立 warn_key),
+                    连续循环错误
+              冷却: _TG_WARN_INTERVAL 15→30 min, 同类去重
+              IFD freeze 告警从直接 send_tg_fn 改走 _push_system_warning
+              便于 30 min 节流和未来追加 detail。
+              recovered 消息保持独立 (不属于"异常告警")。
     v0.5.32 (2026-05-15):
       - [FIX] P0 #1.1 修复盘前/盘后/今日 K 线未出现时 freeze 假阳性:
               实盘上线立即触发 ⚠️ + 硬重连 + 假 TG 告警的根因是
@@ -240,7 +285,7 @@ from .proactive_reminder import check_and_fire_reminders
 from .event_calendar import format_event_line
 
 
-FOCUS_MGR_VERSION = "v0.5.32"
+FOCUS_MGR_VERSION = "v0.5.33"  # v0.5.33: unified alert format + 30min cooldown
 FOCUS_MGR_DATE    = "2026-05-15"
 
 # ── 全局单例 ─────────────────────────────────────────────
@@ -558,21 +603,48 @@ _kl_subscribed: dict = {}         # {(ticker, subtype): last_subscribed_ts}，�
 _snapshot_last_write: float = 0.0  # v0.5.21 共享快照节流时间戳
 
 # v0.5.22 关键错误 TG 推送
+# v0.5.33: 冷却 15→30 min, 推送格式改为统一"MagicQuant 数据异常告警"
 _send_tg_ref = None               # _focus_loop 启动时写入，供工具函数调用
 _tg_warn_last: dict = {}          # {warn_key: last_push_epoch}，同类告警节流
-_TG_WARN_INTERVAL = 15 * 60      # 同类告警最短间隔 15 min
+_TG_WARN_INTERVAL = 30 * 60       # v0.5.33: 同类告警最短间隔 30 min
 
 
-def _push_system_warning(warn_key: str, error_type: str, detail: str):
-    """推送关键系统警告到 Telegram；同类警告 15 min 内不重复推，避免刷屏。"""
+def _push_system_warning(warn_key: str, error_type: str, detail: str = "",
+                         *, duration_min: int = 0,
+                         impact: str = "信号可能不准",
+                         suggestion: str = "检查 Futu OpenD"):
+    """
+    v0.5.33: 统一数据异常告警格式 (30 min 同类节流)。
+
+    Args:
+      warn_key:     去重 key (e.g. "kline_sub", "futu_conn_128")
+      error_type:   错误类型显示文字
+      detail:       详情字符串 (附在末尾, 可空)
+      duration_min: 持续时间(分钟), 0 表示瞬时
+      impact:       影响描述
+      suggestion:   建议操作
+    """
     global _tg_warn_last
     now = time.time()
     if now - _tg_warn_last.get(warn_key, 0) < _TG_WARN_INTERVAL:
         return
     _tg_warn_last[warn_key] = now
 
-    ts  = datetime.now().strftime("%H:%M")
-    msg = f"⚠️ 系统警告\n[{error_type}] {detail}\n时间: {ts}"
+    ts = datetime.now().strftime("%H:%M")
+    dur_disp = f"{duration_min} 分钟" if duration_min > 0 else "刚发生"
+    lines = [
+        "⚠️ MagicQuant 数据异常告警",
+        "━━━━━━━━━━━━━━",
+        f"错误类型: {error_type}",
+        f"持续时间: {dur_disp}",
+        f"影响: {impact}",
+        f"建议: {suggestion}",
+    ]
+    if detail:
+        lines.append(f"详情: {detail}")
+    lines.append(f"时间: {ts}")
+    msg = "\n".join(lines)
+
     print(f"  [focus] SYS_WARN [{error_type}]: {detail}")
 
     if _send_tg_ref:
@@ -588,7 +660,16 @@ _kl_push_lock = threading.Lock()
 
 # ══════════════════════════════════════════════════════════════════
 #  v0.5.32 P0 #1: 指标"数值"冻结检测器
+#  v0.5.33 紧急修复: 默认阈值 5→30 + 诊断 history ring buffer
+#  v0.5.33 P0 KILL SWITCH: detector 全局禁用 —
+#    线上仍有"明显不同的 RSI/vol 也告警"的情况, 逻辑或上下文有未知 bug,
+#    今晚先停告警刷屏, 周末再排查根因。
+#    覆盖路径: (a) update() 早返回 "ok" — 状态机不进入冻结
+#              (b) _focus_loop 跳过整个 IFD 块 — 不跑 reset/reconnect
+#    重启后 startup TG 会带"冻结检测器已临时禁用"确认。
+#    测试可通过 fm._IFD_DISABLED = False 临时打开,验证状态机逻辑。
 # ══════════════════════════════════════════════════════════════════
+_IFD_DISABLED: bool = True   # v0.5.33 P0: 临时禁用, 周末修复
 class IndicatorFreezeDetector:
     """
     检测 RSI + vol_ratio 数值连续 N 次完全相同 → 视为指标冻结。
@@ -600,14 +681,18 @@ class IndicatorFreezeDetector:
         "freeze_ongoing"  — 已在冻结中,数值仍未变
         "recovered"       — 数值变化,从冻结状态恢复
 
-    阈值 N 默认 5(配 30s 拉取间隔 ≈ 150s 才告警),可注入便于测试。
+    阈值 N 默认 30(配 30s 拉取间隔 ≈ 15 min 才告警),可注入便于测试。
+    history ring buffer 保留最近 12 次采样,用于诊断告警来源。
     """
-    def __init__(self, threshold: int = 5):
+    def __init__(self, threshold: int = 30):
         self.threshold = threshold
         self.sig_last = None
         self.sig_repeat = 0
         self.frozen = False
         self.freeze_started_ts = 0.0
+        # v0.5.33 紧急修复: 诊断历史 (ts, rsi, vol, sig, sig_repeat)
+        from collections import deque
+        self.history = deque(maxlen=12)
 
     @staticmethod
     def _signature(rsi, vol_ratio):
@@ -619,6 +704,9 @@ class IndicatorFreezeDetector:
         return (r, v)
 
     def update(self, rsi, vol_ratio, now=None) -> str:
+        # v0.5.33 P0 KILL SWITCH: 检测器全局禁用 — 不进入状态机, 不告警
+        if _IFD_DISABLED:
+            return "ok"
         if now is None:
             now = time.time()
         sig = self._signature(rsi, vol_ratio)
@@ -632,10 +720,14 @@ class IndicatorFreezeDetector:
             recovered = self.frozen
             self.sig_last = sig
             self.sig_repeat = 1
+            # v0.5.33: 记录新签名采样
+            self.history.append((now, rsi, vol_ratio, sig, self.sig_repeat))
             if recovered:
                 self.frozen = False
                 return "recovered"
             return "ok"
+        # v0.5.33: 重复签名也记录,便于诊断
+        self.history.append((now, rsi, vol_ratio, sig, self.sig_repeat))
 
         if self.sig_repeat >= self.threshold:
             if not self.frozen:
@@ -657,11 +749,29 @@ class IndicatorFreezeDetector:
         """
         v0.5.32 P0 #1.1: 进入盘前/盘后/今日 K 线未出现时主动重置,
         避免下个 RTH 开盘时残留 stale signature 误判。
+        v0.5.33: 同步清空 history,避免诊断时混入跨时段旧采样。
         """
         self.sig_last = None
         self.sig_repeat = 0
         self.frozen = False
         self.freeze_started_ts = 0.0
+        self.history.clear()
+
+    def history_dump(self, limit: int = 12) -> str:
+        """
+        v0.5.33 紧急修复: 打印最近 N 次 (rsi, vol_ratio, sig_repeat) 采样,
+        诊断告警来源 — 若 sig_repeat 单调递增 → 真冻结;
+        若 sig_repeat 反复回到 1 → 数据在变,detector 误报。
+        """
+        if not self.history:
+            return "(empty)"
+        lines = []
+        for ts, rsi, vol, _sig, rep in list(self.history)[-limit:]:
+            hms = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+            r = f"{rsi:.2f}" if isinstance(rsi, (int, float)) else str(rsi)
+            v = f"{vol:.4f}" if isinstance(vol, (int, float)) else str(vol)
+            lines.append(f"    {hms} rsi={r} vol={v} repeat={rep}")
+        return "\n".join(lines)
 
 
 class _KLinePushHandler(_KLHandlerBase):
@@ -1093,9 +1203,14 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
     last_soft_resub_ts    = 0.0       # v0.5.31 冻结检测：上次软重订阅的时刻(防抖)
 
     # v0.5.32 P0 #1 指标"数值"冻结检测：抓 RSI/vol_ratio 不变(独立于 bar 不变)
-    # | indicator-value freeze: RSI+vol_ratio identical for 5 consecutive ticks
-    indicator_freeze         = IndicatorFreezeDetector(threshold=5)
+    # | indicator-value freeze: RSI+vol_ratio identical for N consecutive ticks
+    # v0.5.33 P0: 删除硬编码 threshold=5 — 5×30s=2.5min < 5m K 柱周期, bar 内
+    #              恒定必然误报。用类默认值 30 (30×30s=15min 跨 3 个 5m 柱)。
+    #              当前 _IFD_DISABLED=True kill switch 仍生效,周末修复前不会跑。
+    indicator_freeze         = IndicatorFreezeDetector()
     indicator_freeze_last_act = 0.0   # 上次硬重连时刻(限频 5 min)
+    # v0.5.33: 挂到 session 上,heartbeat 才能读 .frozen
+    session._indicator_freeze = indicator_freeze
 
     # v0.5.20 趋势锁定状态
     trend_lock_dir        = None      # "long" / "short" / None
@@ -1122,6 +1237,12 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
     try:
         send_tg_fn(f"🎯 盯盘循环已启动 · {session.master.replace('US.','')}\n"
                    f"{format_market_status()}")
+        # v0.5.33 P0: detector 临时禁用确认 — 重启后必推一次
+        if _IFD_DISABLED:
+            send_tg_fn(
+                "✅ 冻结检测器已临时禁用，告警刷屏停止\n"
+                "(v0.5.33 P0 kill switch · 周末排查根因)"
+            )
     except Exception:
         pass
 
@@ -1224,6 +1345,9 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
             # v0.5.32 P0 #1.1: 必须只在"RTH + 今日 K 线已出"时跑,否则
             # 盘前/盘后/隔夜 indicators 全由昨日 K 计算,本就恒定,会误报。
             # | Only run during RTH AND when today's bar is in cache.
+            #
+            # v0.5.33 P0 KILL SWITCH: 整块跳过, 不跑 reset/reconnect/告警。
+            # | Entire block skipped — no reset, no reconnect, no alert.
             _bar_is_today = False
             if (kline_cache is not None
                     and "time_key" in kline_cache.columns
@@ -1232,7 +1356,9 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
                 _et_today = datetime.now(ET).strftime("%Y-%m-%d")
                 _bar_is_today = _last_tk.startswith(_et_today)
 
-            if not (market_status == "regular" and _bar_is_today):
+            if _IFD_DISABLED:
+                pass  # v0.5.33 P0: detector disabled — skip everything below
+            elif not (market_status == "regular" and _bar_is_today):
                 # 盘前/盘后/今日K线未出 → 跳过且 reset,避免下次开盘 stale 状态
                 indicator_freeze.reset()
             elif indicators_cache and indicators_cache.get("data_ok"):
@@ -1244,18 +1370,23 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
                     _rsi_disp = _rsi_now if _rsi_now is not None else "?"
                     _vol_disp = (f"{_vol_now:.2f}"
                                  if isinstance(_vol_now, (int, float)) else "?")
+                    _thresh = indicator_freeze.threshold
+                    _freeze_min = int(_thresh * 30 / 60)  # 阈值 × 30s 拉取
                     print(f"  [focus] ⚠️ indicator value freeze "
-                          f"(RSI={_rsi_disp} vol={_vol_disp} ×5 identical) "
-                          f"— signal push paused, hard reconnecting")
-                    try:
-                        send_tg_fn(
-                            f"⚠️ 指标冻结 ~2 分钟,信号已暂停\n"
-                            f"RSI={_rsi_disp}  量比={_vol_disp}  连续 5 次未变化\n"
-                            f"\n"
-                            f"已强制重连 K_5M 订阅,数据恢复后会再推 ✅"
-                        )
-                    except Exception:
-                        pass
+                          f"(RSI={_rsi_disp} vol={_vol_disp} ×{_thresh} identical "
+                          f"~{_freeze_min}min) — signal push paused, hard reconnecting")
+                    # v0.5.33 紧急修复: 打印 history 诊断 (上线后必看)
+                    print(f"  [focus] freeze history (last {_thresh} samples):")
+                    print(indicator_freeze.history_dump())
+                    # v0.5.33: 走统一告警通道 (30 min 同类冷却)
+                    _push_system_warning(
+                        "indicator_freeze", "指标冻结",
+                        f"RSI={_rsi_disp} 量比={_vol_disp} "
+                        f"连续 {_thresh} 次未变化 (~{_freeze_min}min)",
+                        duration_min=_freeze_min,
+                        impact="信号已暂停",
+                        suggestion="自动重连 K_5M 中, 仍异常请重启 Futu OpenD",
+                    )
                 elif _state == "recovered":
                     _frozen_min = indicator_freeze.freeze_minutes(now=now) or 1
                     print(f"  [focus] ✅ indicators recovered (frozen ~{_frozen_min}min)")
@@ -1282,13 +1413,16 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
                     indicator_freeze_last_act = now
 
             # v0.5.22: has_indicators 连续 10 min False → 系统警告
+            # v0.5.33: 改走统一数据异常告警格式
             if indicators_cache.get("data_ok"):
                 last_has_indicators_ts = now
             elif now - last_has_indicators_ts > 600:
                 _push_system_warning(
-                    "no_indicators", "指标长时间不可用",
-                    f"has_indicators 已持续 {int((now - last_has_indicators_ts) / 60)} 分钟为 False，"
-                    f"RSI/VWAP/量比 均使用默认值，信号质量差"
+                    "no_indicators", "has_indicators 失效",
+                    "RSI/VWAP/量比 均使用默认值",
+                    duration_min=int((now - last_has_indicators_ts) / 60),
+                    impact="信号质量差 (使用默认值)",
+                    suggestion="检查 Futu OpenD / 重启系统",
                 )
 
             if now - last_position_fetch >= POSITION_FETCH_INTERVAL:
@@ -1518,14 +1652,31 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
             traceback.print_exc()
             err_str = str(e).lower()
             # v0.5.22: Futu 连接失败检测（连接数超128 / Context status bad）
-            if any(kw in err_str for kw in
-                   ("128", "context status", "status bad", "connection failed", "connect error")):
-                _push_system_warning("futu_conn", "Futu 连接失败", str(e)[:120])
+            # v0.5.33: 拆分 "128 连接数溢出" 与 "通用连接断开" 告警类型
+            if "128" in err_str:
+                _push_system_warning(
+                    "futu_conn_128", "Futu 连接数超 128",
+                    str(e)[:120],
+                    impact="信号已暂停",
+                    suggestion="重启 Futu OpenD (释放连接配额)",
+                )
+            elif any(kw in err_str for kw in
+                     ("context status", "status bad",
+                      "connection failed", "connect error")):
+                _push_system_warning(
+                    "futu_conn", "Futu 连接断开",
+                    str(e)[:120],
+                    impact="信号已暂停",
+                    suggestion="重启 Futu OpenD / 重启系统",
+                )
             # v0.5.22: 连续 5 次 loop error → 系统警告
             if consecutive_errors >= 5:
                 _push_system_warning(
                     "loop_errors", "连续循环错误",
-                    f"连续 {consecutive_errors} 次 loop error，最近: {str(e)[:80]}"
+                    f"最近: {str(e)[:80]}",
+                    duration_min=0,
+                    impact="信号可能中断",
+                    suggestion="检查日志 / 重启系统",
                 )
             if session.error_count % 5 == 0:
                 time.sleep(5)
@@ -1582,9 +1733,13 @@ def _fetch_5m_kline(client, ticker: str, num: int = 200):
                         print(f"  [focus] set_handler failed (non-fatal): {_he}")
             else:
                 print(f"  [focus] subscribe {ticker} K_5M failed (ret={ret_sub}): {err_sub}")
-                # v0.5.22: 订阅失败推系统警告
-                _push_system_warning("kline_sub", "K线订阅失败",
-                    f"{ticker} K_5M ret={ret_sub}: {str(err_sub)[:80]}")
+                # v0.5.22: 订阅失败推系统警告 (v0.5.33: 统一格式)
+                _push_system_warning(
+                    "kline_sub", "K_5M 订阅失败",
+                    f"{ticker} ret={ret_sub}: {str(err_sub)[:80]}",
+                    impact="信号已暂停 (拿不到 5m K 线)",
+                    suggestion="检查 Futu OpenD / 重启系统",
+                )
                 # 订阅失败仍继续尝试 get_cur_kline（可能已在别处订阅）
 
         with client._quote_lock:
