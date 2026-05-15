@@ -110,6 +110,38 @@ def test_recovery_with_threshold_3():
     assert d.update(61.0, 2.6, now=120) == "ok"
 
 
+def test_reset_clears_all_state():
+    """v0.5.32 P0 #1.1: reset() 清除全部状态(给盘前/盘后跳过用)"""
+    d = IndicatorFreezeDetector(threshold=3)
+    for t in (0, 30, 60):
+        d.update(60.0, 2.5, now=t)
+    assert d.frozen
+    d.reset()
+    assert d.sig_last is None
+    assert d.sig_repeat == 0
+    assert not d.frozen
+    assert d.freeze_started_ts == 0.0
+    # reset 后,从新一轮开始累积
+    assert d.update(60.0, 2.5, now=120) == "ok"
+    assert d.sig_repeat == 1
+
+
+def test_reset_avoids_carryover_across_premarket():
+    """
+    模拟场景: 盘前累积到 frozen,盘前 reset(),开盘后 RSI 跳变 → 不该被
+    判为 recovered (因为根本没真冻结过)
+    """
+    d = IndicatorFreezeDetector(threshold=3)
+    # 盘前累积冻结
+    for t in (0, 30, 60):
+        d.update(57.9, 5.87, now=t)
+    assert d.frozen
+    # 盘前 reset
+    d.reset()
+    # 开盘第一次更新 — 应该是 ok,而非 recovered
+    assert d.update(58.4, 6.71, now=600) == "ok"
+
+
 if __name__ == "__main__":
     # 简易自跑(不依赖 pytest)
     fns = [v for k, v in list(globals().items()) if k.startswith("test_")]

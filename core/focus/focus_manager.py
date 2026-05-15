@@ -5,6 +5,16 @@
   DATE    : 2026-05-15
   CHANGES :
     v0.5.32 (2026-05-15):
+      - [FIX] P0 #1.1 修复盘前/盘后/今日 K 线未出现时 freeze 假阳性:
+              实盘上线立即触发 ⚠️ + 硬重连 + 假 TG 告警的根因是
+              v0.5.28 既有"bar 不变"分支已经识别盘前/今日K线未出
+              并静默等待,但本轮 P0#1 新加的"数值冻结"检测没复用
+              这个 gate — pre-market 时 indicators 全来自昨日 K
+              本就恒定,5 次相同必然触发。
+              修复: 数值冻结检测加 (market_status==regular AND
+              bar_is_today) 双重 gate; 不满足则 reset() 状态机,
+              避免 stale signature 跨盘前→开盘残留。
+              新增 IndicatorFreezeDetector.reset() 方法 + 2 个回归测试。
       - [NEW] P0 #1 指标数值冻结检测器:
               v0.5.28 的"bar time_key 不变"只能抓到 K 线推送流死掉,
               抓不到"K 线在推但内容停滞"(RSI/vol_ratio 数值连续 5 次完全
@@ -643,6 +653,16 @@ class IndicatorFreezeDetector:
             now = time.time()
         return max(1, int((now - self.freeze_started_ts) / 60))
 
+    def reset(self):
+        """
+        v0.5.32 P0 #1.1: 进入盘前/盘后/今日 K 线未出现时主动重置,
+        避免下个 RTH 开盘时残留 stale signature 误判。
+        """
+        self.sig_last = None
+        self.sig_repeat = 0
+        self.frozen = False
+        self.freeze_started_ts = 0.0
+
 
 class _KLinePushHandler(_KLHandlerBase):
     """
@@ -1200,7 +1220,22 @@ def _focus_loop(session: FocusSession, send_tg_fn: Callable, stop_event: threadi
             # K_5M push stream sometimes silently dies — bar advances but RSI/vol
             # come back identical. 5 consecutive identical signatures (~150s @
             # 30s fetch interval) trip the freeze gate.
-            if indicators_cache and indicators_cache.get("data_ok"):
+            #
+            # v0.5.32 P0 #1.1: 必须只在"RTH + 今日 K 线已出"时跑,否则
+            # 盘前/盘后/隔夜 indicators 全由昨日 K 计算,本就恒定,会误报。
+            # | Only run during RTH AND when today's bar is in cache.
+            _bar_is_today = False
+            if (kline_cache is not None
+                    and "time_key" in kline_cache.columns
+                    and len(kline_cache) > 0):
+                _last_tk = str(kline_cache["time_key"].iloc[-1])
+                _et_today = datetime.now(ET).strftime("%Y-%m-%d")
+                _bar_is_today = _last_tk.startswith(_et_today)
+
+            if not (market_status == "regular" and _bar_is_today):
+                # 盘前/盘后/今日K线未出 → 跳过且 reset,避免下次开盘 stale 状态
+                indicator_freeze.reset()
+            elif indicators_cache and indicators_cache.get("data_ok"):
                 _rsi_now = indicators_cache.get("rsi_5m")
                 _vol_now = indicators_cache.get("vol_ratio")
                 _state = indicator_freeze.update(_rsi_now, _vol_now, now=now)
