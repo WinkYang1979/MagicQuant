@@ -5,6 +5,12 @@
   DATE    : 2026-05-15
   CHANGES :
     v0.5.32 (2026-05-15):
+      - [NEW] P0 #3 RKLX/RKLZ 高位追多封顶 at _fmt_signal_with_conflict:
+              follower ∈ {US.RKLX, US.RKLZ} + LONG + day_chg ≥ 10% →
+                · conf 上限 60(优先取已有 cap 的更小值)
+                · 标题 [强烈] 标签替换为 [一般]
+                · conf_line 末尾追加 "⚠️ 已大涨,谨慎追多"
+              焦点案例: RKLX +13.45% 仍打 95% 强烈看多 → 现在被压到 60% 一般
       - [NEW] P0 #2 盈亏比闸门 (R/R gate) at _fmt_signal_with_conflict:
               · R/R = abs(t1-entry) / abs(entry-stop), 用 follower 域价位
               · R/R < 1.5         → 直接 return None,信号被 format 阻断
@@ -1710,10 +1716,35 @@ def _fmt_signal_with_conflict(hit, session, signal_direction, title_line, tech_l
               f"R/R {rr:.2f}:1 ∈ [1.5,2) → conf {conf} → 60")
         conf = 60
 
+    # ── v0.5.32 P0 #3: RKLX/RKLZ 高位追多封顶 ──
+    # | RKLX/RKLZ are 3x leveraged followers; +10% intraday is already extreme.
+    # | Cap conf to 60, demote strength label, and append warning to conf_line.
+    HIGH_GAIN_FOLLOWERS = ("US.RKLX", "US.RKLZ")
+    HIGH_GAIN_THRESHOLD = 10.0
+    chase_warn = False
+    if (signal_direction == "long"
+            and target_etf in HIGH_GAIN_FOLLOWERS
+            and session is not None
+            and hasattr(session, "get_day_change_pct")):
+        _follower_day_chg = session.get_day_change_pct(target_etf)
+        if _follower_day_chg is not None and _follower_day_chg >= HIGH_GAIN_THRESHOLD:
+            chase_warn = True
+            if conf > 60:
+                print(f"  [pusher] {hit.get('trigger')} {target_etf} "
+                      f"day_chg {_follower_day_chg:+.2f}% ≥ {HIGH_GAIN_THRESHOLD}% "
+                      f"→ conf {conf} → 60 (anti-chase)")
+                conf = 60
+            # 强度标签强制 WEAK(去 [强烈])
+            strength = "WEAK"
+            # 标题 [强烈] → [一般]
+            title_line = title_line.replace("[强烈]", "[一般]")
+
     conf_emoji = _confidence_emoji(conf)
     conf_line = f"{conf_emoji} 信心: {_strength_bar(conf)}"
     if rr is not None:
         conf_line += f"  ·  盈亏比 {rr:.1f}:1"
+    if chase_warn:
+        conf_line += "  ·  ⚠️ 已大涨,谨慎追多"
 
     # v0.5.20: 行情类型 + 方向偏向
     regime = _market_regime_label(hit)
