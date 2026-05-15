@@ -5,6 +5,14 @@
   DATE    : 2026-05-16
   CHANGES :
     v0.5.33 (2026-05-16):
+      - [P0 v2] _fmt_signal_with_conflict: STRONG 信号豁免 R/R 闸门
+              线上重启后 swing_bottom RKLB R/R 1.14:1 < 1.5 仍被拦 —
+              用户反馈"今晚熄火,昨晚版本准确"。R/R<1.5 在窄震荡区间
+              (session range < 4%) 对所有 swing_bottom 都成立, P0#2 闸门
+              退化为"全堵"。
+              处理: STRONG 强度信号 (detector 已经多条件确认) 跳过闸门。
+                    WEAK 信号仍按闸门拦截。
+              覆盖回归: tests/test_rr_strong_bypass_v0_5_33.py
       - [HOTFIX P0] _compute_rr: reward<0.5% of entry → return None
               v0.5.32 P0#2 R/R 闸门把 swing_bottom 全部默默吃掉 —
               2026-05-15 ET 全天 248 条 trigger 里 0 条 swing_bottom。
@@ -1731,11 +1739,21 @@ def _fmt_signal_with_conflict(hit, session, signal_direction, title_line, tech_l
     # ── v0.5.32 P0 #2: 盈亏比闸门 (R/R<1.5 完全禁推, 1.5-2 信心封顶 60) ──
     # | Risk/reward gate: hard block <1.5; conf cap to 60 in [1.5, 2);
     # | missing target/stop returns None from _compute_rr → pass through.
+    # v0.5.33 P0: STRONG 强度信号豁免闸门 —
+    #   detector 已确认高质量底部/顶部 (RSI 强超买/超卖 + 强 candle + 紧贴
+    #   极值), 闸门按"鸡肋信号"逻辑拦它是错位的。WEAK 仍走闸门。
+    #   | STRONG signals bypass the R/R gate — the detector already proved
+    #   | conviction; gating them as "marginal" defeats the detector's intent.
     rr = _compute_rr(display_targets, rr_entry)
     if rr is not None and rr < 1.5:
-        print(f"  [pusher] ⛔ {hit.get('trigger')} {hit['ticker']} "
-              f"R/R {rr:.2f}:1 < 1.5 — push blocked")
-        return None
+        if strength == "STRONG":
+            print(f"  [pusher] {hit.get('trigger')} {hit['ticker']} STRONG "
+                  f"bypasses R/R gate (R/R={rr:.2f}:1 < 1.5)")
+            rr = None   # 后续 conf cap 跳过 ([1.5,2) 那段); 给 STRONG 全分
+        else:
+            print(f"  [pusher] ⛔ {hit.get('trigger')} {hit['ticker']} "
+                  f"R/R {rr:.2f}:1 < 1.5 — push blocked")
+            return None
 
     # ── 信心分(R/R 1.5-2 → cap 60) ──
     conf = _confidence_score(hit)
