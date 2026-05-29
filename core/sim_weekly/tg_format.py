@@ -28,8 +28,20 @@ PAPER_SUFFIX = "(纸面模拟)"
 # 标的 → 对 RKLB 的方向白话(RKLX=2x做多, RKLZ=2x做空/反向)
 _BIAS = {"RKLX": "看多RKLB", "RKLB": "看多RKLB", "RKLZ": "看空RKLB"}
 
-# 策略理由速记 → 大白话(多词短语优先)
+# 策略理由速记 → 大白话(整句/多词短语优先匹配)
 _REASON_PHRASES = [
+    # 离场 / 结算原因
+    ("openai opposite signal", "出现反向信号，离场"),
+    ("openai trail stop", "触发移动止损，离场"),
+    ("trail/stop hit", "触发止损/移动止损"),
+    ("flip exit", "反向信号，离场"),
+    ("friday close settle", "周五收盘结算"),
+    ("buy&hold", "买入持有"),
+    ("bull profile avoids countertrend short", "多头画像回避逆势做空"),
+    ("no-setup", "无符合形态"),
+    ("indicators-na", "指标数据不足"),
+    ("warmup", "预热中"),
+    # 进场信号短语
     ("5m up", "5分钟上行"),
     ("5m down", "5分钟下行"),
     ("trend long", "顺势做多"),
@@ -39,7 +51,11 @@ _REASON_PHRASES = [
     ("px>vwap", "价在VWAP上方"),
     ("px<vwap", "跌破VWAP"),
     ("STRONG", "强趋势"),
-    ("indicators-na", "指标数据不足"),
+    # OpenAI 风险画像前缀
+    ("neutral", "中性"),
+    ("balanced", "均衡"),
+    ("aggressive", "激进"),
+    ("conservative", "保守"),
 ]
 
 
