@@ -4,6 +4,13 @@
   VERSION : v0.5.1
   DATE    : 2026-05-13
   CHANGES :
+    v0.5.2 (2026-05-15):
+      - [DISABLED] 停用 TradingAgents:main() 不再启动/读取 TA 报告，
+        热点事件板块去掉 AI 判定，只保留本地技术信号
+      - [DISABLED] 停用昨日操作复盘:main() 不再拉取成交/匹配信号，
+        删除简报"昨日操作复盘"板块 — 等信号匹配逻辑修好后再启用
+      - [CHG] calc_consensus 由"两层共识"降级为单层结论（仅基于 daily_briefing 评分）
+        | TradingAgents & yesterday-review disabled; consensus -> single-layer
     v0.5.1 (2026-05-13):
       - [BUG] 当日盈亏算成 (卖出收入 - 当日买入成本) — 忽略昨日遗留
               持仓的真实成本,导致继承持仓被低估或高估。
@@ -64,7 +71,7 @@
 ════════════════════════════════════════════════════════════════════
 """
 
-import os, sys, re, json, requests
+import os, sys, re, json, subprocess, time, requests
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -101,6 +108,8 @@ except Exception:
     FUTU_PORT  = int(os.getenv("FUTU_PORT", "11111"))
 
 TA_LOG_BASE = Path.home() / ".tradingagents" / "logs"
+TA_PROCESS_FILE = BASE_DIR.parent / "data" / "shared" / "ta_process.json"
+TA_TIMEOUT_SEC = 40 * 60
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -531,7 +540,7 @@ def calc_key_levels(ind: dict) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════
-#  TradingAgents 报告读取
+#  TradingAgents 报告读取  [DISABLED] 停用 — 函数保留供日后重启用
 # ══════════════════════════════════════════════════════════════════
 def load_trading_agents(ticker: str) -> dict:
     """v0.5: 优先 final_decision.md 拿结构化字段 (Rating / Price Target / Time Horizon
@@ -660,31 +669,115 @@ def load_trading_agents(ticker: str) -> dict:
     return out
 
 
+def _last_us_trading_day_str() -> str:
+    d = datetime.now().date() - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d.strftime("%Y-%m-%d")
+
+
+def _ta_report_exists(ticker: str, trade_date: str) -> bool:
+    return (
+        TA_LOG_BASE / ticker / trade_date / "reports" / "market_report.md"
+    ).exists()
+
+
+def _pid_running(pid: int) -> bool:
+    if not pid:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x1000, False, int(pid))
+            if not handle:
+                return False
+            code = ctypes.c_ulong()
+            kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            kernel32.CloseHandle(handle)
+            return code.value == 259
+        except Exception:
+            return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except OSError:
+        return False
+
+
+def _load_ta_process() -> dict:
+    try:
+        if TA_PROCESS_FILE.exists():
+            return json.loads(TA_PROCESS_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"  [TA] read process file failed: {e}")
+    return {}
+
+
+def _record_ta_process(proc, ticker: str, trade_date: str) -> None:
+    TA_PROCESS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "pid": proc.pid,
+        "ticker": ticker,
+        "trade_date": trade_date,
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+        "timeout_sec": TA_TIMEOUT_SEC,
+    }
+    TA_PROCESS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def start_tradingagents_background(ticker: str) -> bool:
+    trade_date = _last_us_trading_day_str()
+    if _ta_report_exists(ticker, trade_date):
+        print(f"  [TA] report already exists: {ticker} {trade_date}")
+        return False
+
+    prev = _load_ta_process()
+    if prev.get("trade_date") == trade_date and _pid_running(int(prev.get("pid") or 0)):
+        print(f"  [TA] already running pid={prev.get('pid')}")
+        return True
+
+    project_root = BASE_DIR.parent
+    log_dir = project_root / "data" / "shared"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "tradingagents_bg.log"
+    log_fh = open(log_path, "a", encoding="utf-8")
+    proc = subprocess.Popen(
+        [sys.executable, str(project_root / "run_ta_daily.py")],
+        cwd=str(project_root),
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+    )
+    _record_ta_process(proc, ticker, trade_date)
+
+    watcher = project_root / "tradingagents_notify.py"
+    if watcher.exists():
+        subprocess.Popen(
+            [sys.executable, str(watcher), "--watch", "--pid", str(proc.pid),
+             "--ticker", ticker, "--date", trade_date, "--timeout", str(TA_TIMEOUT_SEC)],
+            cwd=str(project_root),
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+        )
+    print(f"  [TA] started background pid={proc.pid}, log={log_path}")
+    return True
+
+
 # ══════════════════════════════════════════════════════════════════
-#  两层共识
+#  单层结论（仅基于 daily_briefing 评分）
+#  [DISABLED] 停用 TradingAgents — 原"两层共识"降级为单层
+#  | single-layer verdict from daily_briefing bias only
 # ══════════════════════════════════════════════════════════════════
-def calc_consensus(bias: dict, ta: dict) -> dict:
+def calc_consensus(bias: dict) -> dict:
     db_side = ("bullish" if "bullish" in bias["bias"] else
                "bearish" if "bearish" in bias["bias"] else "neutral")
-    ta_decision = ta.get("decision", "UNKNOWN")
-    ta_side = ("bullish" if ta_decision == "BUY" else
-               "bearish" if ta_decision == "SELL" else "neutral")
-
-    if db_side == ta_side == "bullish":
-        return {"emoji": "🤝", "text": "两层共振看多，信号较强"}
-    if db_side == ta_side == "bearish":
-        return {"emoji": "🤝", "text": "两层共振看空，建议规避"}
-    if db_side == ta_side == "neutral":
-        return {"emoji": "🤝", "text": "两层一致观望，等待方向"}
-    if db_side == "bullish" and ta_side == "neutral":
-        return {"emoji": "⚡", "text": "短线偏多 / AI 观望，轻仓试探"}
-    if db_side == "neutral" and ta_side == "bullish":
-        return {"emoji": "⚡", "text": "短线中性 / AI 看多，等日线确认"}
-    if db_side == "bearish" and ta_side == "neutral":
-        return {"emoji": "⚡", "text": "短线偏空 / AI 观望，保守为主"}
-    if db_side == "neutral" and ta_side == "bearish":
-        return {"emoji": "⚡", "text": "短线中性 / AI 看空，减少暴露"}
-    return {"emoji": "⚠️", "text": "两层分歧，建议空仓观望"}
+    if db_side == "bullish":
+        return {"emoji": "📈", "text": "短线偏多，可轻仓试探"}
+    if db_side == "bearish":
+        return {"emoji": "📉", "text": "短线偏空，建议规避"}
+    return {"emoji": "➡️", "text": "方向不明，观望为主"}
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -972,7 +1065,7 @@ def _bar(pct: float, width: int = 10) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════
-#  v0.5: 昨日操作复盘
+#  v0.5: 昨日操作复盘  [DISABLED] 停用 — 函数保留供日后重启用
 # ══════════════════════════════════════════════════════════════════
 def _melbourne_yesterday_str() -> str:
     try:
@@ -1487,25 +1580,9 @@ def format_briefing(ticker: str, ind: dict, bias: dict, levels: dict,
         f"",
     ]
 
-    # ══ 板块一：热点事件 + AI 操作结论 ═════════════════════════════
+    # ══ 板块一：热点事件（本地技术信号）══════════════════════════
+    # [DISABLED] 停用 TradingAgents — 去掉 AI 判定，只保留本地技术信号
     lines.append("🔥 <b>热点事件</b>")
-    if ta.get("found"):
-        lines.append(f"AI 判定 ({ta['date']}): "
-                     f"{ta['decision_emoji']} <b>{ta['decision_label']}</b>")
-        if ta.get("entry_zone"):
-            lo, hi = ta["entry_zone"]
-            lines.append(f"  介入区间: ${lo}-${hi}")
-        if ta.get("price_target"):
-            lines.append(f"  止盈目标: ${ta['price_target']}")
-        if ta.get("stop_level"):
-            lines.append(f"  止损位: ${ta['stop_level']}")
-        if ta.get("horizon_class") != "—":
-            th = ta.get("time_horizon") or ""
-            lines.append(f"  持有周期: {ta['horizon_class']}（{th[:40]}）" if th else f"  持有周期: {ta['horizon_class']}")
-        lines.append(f"  风险等级: {ta['risk_level']}")
-    else:
-        lines.append("AI 判定: 未运行")
-    lines.append("")
     lines.append("技术信号:")
     for s in _chinese_signals(ind, bias):
         lines.append(f"• {s}")
@@ -1544,8 +1621,8 @@ def format_briefing(ticker: str, ind: dict, bias: dict, levels: dict,
 
     # ══ 板块四：今日策略（结构化）═════════════════════════════════
     lines.append("🧭 <b>今日策略</b>")
-    consensus = calc_consensus(bias, ta)
-    lines.append(f"{consensus['emoji']} 两层共识: {consensus['text']}")
+    consensus = calc_consensus(bias)
+    lines.append(f"{consensus['emoji']} 短线结论: {consensus['text']}")
 
     if strat.get("action") == "enter_long":
         conf = bias.get("confidence", 0)
@@ -1583,80 +1660,9 @@ def format_briefing(ticker: str, ind: dict, bias: dict, levels: dict,
         lines.append("➡️ 方向不明，观望为主")
     lines.append("")
 
-    # ══ 板块五：昨日操作复盘 ══════════════════════════════════════
-    # v0.5.1: FIFO 真实盈亏 + 信号方向匹配
-    lines.append("📋 <b>昨日操作复盘</b>")
-    if review:
-        # 初始持仓 (继承前一交易日)
-        init_pos = review.get("initial_positions", {}) or {}
-        if init_pos:
-            init_parts = [f"{tk} {v['qty']}股 @${v['cost']:.2f}"
-                          for tk, v in init_pos.items()]
-            lines.append(f"初始持仓: {' / '.join(init_parts)}")
-
-        if review.get("trades"):
-            lines.append("你的操作:")
-            for t in review["trades"]:
-                sig = (f"（{t['trigger']} 跟随 {t['gap_min']}min ✓）"
-                       if t.get("trigger") else "（自主操作 · 无对应信号）")
-                lines.append(
-                    f"  {t['time']}  {t['side']} {t['ticker']} "
-                    f"{t['qty']}股 @${t['price']:.2f} {sig}"
-                )
-                # 卖出附加 FIFO 匹配明细
-                if t["side"] == "卖出" and t.get("matched_lots"):
-                    match_parts = [f"{m['qty']}股×${m['buy_price']:.2f}({m['source']})"
-                                   for m in t["matched_lots"]]
-                    net_sign   = "+" if t["net_pl"]   >= 0 else "-"
-                    gross_sign = "+" if t["gross_pl"] >= 0 else "-"
-                    lines.append(
-                        f"    └ FIFO: {' + '.join(match_parts)}"
-                        f" = 实现 {net_sign}${abs(t['net_pl']):.2f}"
-                        f"（毛 {gross_sign}${abs(t['gross_pl']):.2f} - 费 ${t['fee']:.2f}）"
-                    )
-                    if t.get("unmatched_qty"):
-                        lines.append(
-                            f"    ⚠️ 缺失 {t['unmatched_qty']} 股 buy 记录"
-                        )
-
-            # 持仓变化
-            pc = review.get("position_changes", {}) or {}
-            if pc:
-                pc_parts = [f"{tk} {init}→{final}" for tk, (init, final) in pc.items()]
-                lines.append(f"持仓变化: {' / '.join(pc_parts)}")
-
-            pnl_net   = review.get("pnl_realized_net",   0.0)
-            pnl_gross = review.get("pnl_realized_gross", 0.0)
-            pnl_fees  = review.get("pnl_fees",           0.0)
-            pnl_word = "盈" if pnl_net > 0 else ("亏" if pnl_net < 0 else "持平")
-            lines.append(
-                f"当日真实盈亏: <b>${pnl_net:+,.2f}</b>（{pnl_word}, "
-                f"毛 ${pnl_gross:+,.2f} - 费 ${pnl_fees:.2f}）"
-            )
-            for w in (review.get("fifo_warnings") or [])[:3]:
-                lines.append(f"  ⚠️ {w}")
-        else:
-            lines.append("昨日无成交")
-        if review.get("missed"):
-            lines.append("")
-            lines.append("错过的强信号:")
-            for m in review["missed"][:3]:
-                ts = m.get("ts", "")[11:19]
-                short = m.get("ticker", "").replace("US.", "")
-                lines.append(f"  {ts}  {short}  {m.get('trigger')}")
-        s = review["scores"]
-        lines.append("")
-        lines.append("行为评分:")
-        lines.append(f"  执行力 {'★' * s['execution']}{'☆' * (5 - s['execution'])}")
-        lines.append(f"  止盈纪律 {'★' * s['profit_discipline']}{'☆' * (5 - s['profit_discipline'])}")
-        lines.append(f"  追高克制 {'★' * s['chase_restraint']}{'☆' * (5 - s['chase_restraint'])}")
-        if review.get("tips"):
-            lines.append("")
-            lines.append("下次改进:")
-            for tip in review["tips"]:
-                lines.append(f"  • {tip}")
-    else:
-        lines.append("昨日无操作")
+    # ══ 板块五：昨日操作复盘 ══  [DISABLED] 已删除该板块 ══════════
+    # 停用昨日操作复盘 — 等信号匹配逻辑修好后再恢复
+    # | yesterday-review section removed until signal-match fix
 
     lines += [
         f"",
@@ -1795,37 +1801,9 @@ def format_briefing_html(ticker: str, ind: dict, bias: dict, levels: dict,
     b = bias["bias"]
     bias_cls = "bull-bg" if "bullish" in b else ("bear-bg" if "bearish" in b else "neut-bg")
 
-    # ══ 板块 1: 热点事件 + AI 详细操作建议 ═════════════════
-    if ta.get("found"):
-        ta_dec = ta.get("decision", "UNKNOWN")
-        dec_cls = "bull" if ta_dec == "BUY" else ("bear" if ta_dec == "SELL" else "neut")
-        rows = (
-            f"<tr><td>建议方向</td>"
-            f"<td class='num'><span class='{dec_cls}'><strong>{ta.get('decision_label','—')}</strong></span></td>"
-            f"<td>AI 综合判定 ({ta['date']})</td></tr>"
-        )
-        if ta.get("entry_zone"):
-            lo, hi = ta["entry_zone"]
-            rows += f"<tr><td>介入区间</td><td class='num bull'>${lo}–${hi}</td><td>AI 给出的回调买入区间</td></tr>"
-        if ta.get("price_target"):
-            pt_pct = ((ta['price_target'] - live_px) / live_px * 100) if live_px > 0 else 0
-            pt_cls = "bull" if pt_pct > 0 else "bear"
-            rows += f"<tr><td>止盈目标</td><td class='num {pt_cls}'>${ta['price_target']}</td><td>距现价 {pt_pct:+.1f}%</td></tr>"
-        if ta.get("stop_level"):
-            sl_pct = ((ta['stop_level'] - live_px) / live_px * 100) if live_px > 0 else 0
-            rows += f"<tr><td>止损位</td><td class='num bear'>${ta['stop_level']}</td><td>跌破触发减仓 ({sl_pct:+.1f}%)</td></tr>"
-        if ta.get("horizon_class") != "—":
-            th = ta.get("time_horizon") or ""
-            rows += f"<tr><td>持有周期</td><td class='num'>{ta['horizon_class']}</td><td>{th}</td></tr>"
-        risk_cls = "fail" if ta["risk_level"] == "高" else ("warn" if ta["risk_level"] == "中" else "ok")
-        rows += f"<tr><td>风险等级</td><td class='num {risk_cls}'><strong>{ta['risk_level']}</strong></td><td></td></tr>"
-        events_html = (
-            f"<table>"
-            f"<tr><th>项目</th><th class='num'>数值</th><th>说明</th></tr>"
-            f"{rows}</table>"
-        )
-    else:
-        events_html = "<p class='neut'>AI 判定: 未运行</p>"
+    # ══ 板块 1: 热点事件（本地技术信号）═════════════════
+    # [DISABLED] 停用 TradingAgents — 去掉 AI 详细操作建议
+    events_html = ""
 
     signals = _chinese_signals(ind, bias)
     if signals:
@@ -1875,9 +1853,9 @@ def format_briefing_html(ticker: str, ind: dict, bias: dict, levels: dict,
             )
 
     # ══ 板块 4: 今日策略（结构化 + 进度条 + 子表）══════════
-    consensus = calc_consensus(bias, ta)
+    consensus = calc_consensus(bias)
     consensus_html = (
-        f"<p><strong>{consensus['emoji']} 两层共识:</strong> {consensus['text']}</p>"
+        f"<p><strong>{consensus['emoji']} 短线结论:</strong> {consensus['text']}</p>"
     )
 
     if strat.get("action") == "enter_long":
@@ -1938,118 +1916,9 @@ def format_briefing_html(ticker: str, ind: dict, bias: dict, levels: dict,
     else:
         strat_html = "<p class='neut'>➡️ 方向不明，观望为主</p>"
 
-    # ══ 板块 5: 昨日操作复盘 ══════════════════════════════
-    # v0.5.1: FIFO 真实盈亏 + 继承持仓 + 持仓变化
-    review_html = ""
-    if review:
-        # 初始持仓 (继承前一交易日 positions_final)
-        init_pos = review.get("initial_positions", {}) or {}
-        if init_pos:
-            init_parts = [f"{tk} {v['qty']}股 @${v['cost']:.2f}"
-                          for tk, v in init_pos.items()]
-            review_html += (
-                "<p><strong>初始持仓（继承前一交易日）:</strong> "
-                + " / ".join(init_parts) + "</p>"
-            )
-
-        # 成交表
-        if review.get("trades"):
-            rows = ""
-            for t in review["trades"]:
-                side_cls = "bull" if t["side"] == "买入" else "bear"
-                sig_txt = (f"<span class='neut'>{t['trigger']} ({t['strength'] or '—'}) 跟随 {t['gap_min']}min ✓</span>"
-                           if t.get("trigger") else "<span class='neut'>自主操作（无对应信号）</span>")
-                rows += (
-                    f"<tr><td>{t['time']}</td>"
-                    f"<td><span class='{side_cls}'><strong>{t['side']}</strong></span></td>"
-                    f"<td>{t['ticker']}</td>"
-                    f"<td class='num'>{t['qty']}</td>"
-                    f"<td class='num'>${t['price']:.2f}</td>"
-                    f"<td class='num'>${t['amount']:,.0f}</td>"
-                    f"<td>{sig_txt}</td></tr>"
-                )
-                # FIFO 匹配明细行 (仅卖出)
-                if t["side"] == "卖出" and t.get("matched_lots"):
-                    match_parts = [f"{m['qty']}×${m['buy_price']:.2f}({m['source']})"
-                                   for m in t["matched_lots"]]
-                    pl_cls     = "bull" if t["net_pl"]   >= 0 else "bear"
-                    net_sign   = "+"    if t["net_pl"]   >= 0 else "-"
-                    gross_sign = "+"    if t["gross_pl"] >= 0 else "-"
-                    rows += (
-                        f"<tr><td colspan='7' style='padding-left:24px;font-size:12px;color:#666'>"
-                        f"└ FIFO: {' + '.join(match_parts)} → "
-                        f"实现 <span class='{pl_cls}'><strong>{net_sign}${abs(t['net_pl']):.2f}</strong></span>"
-                        f"（毛 {gross_sign}${abs(t['gross_pl']):.2f} − 费 ${t['fee']:.2f}）"
-                        f"</td></tr>"
-                    )
-                    if t.get("unmatched_qty"):
-                        rows += (
-                            f"<tr><td colspan='7' style='padding-left:24px;color:#c00'>"
-                            f"⚠️ 缺失 {t['unmatched_qty']} 股 buy 记录</td></tr>"
-                        )
-            trades_table = (
-                "<table>"
-                "<tr><th>时间</th><th>动作</th><th>品种</th>"
-                "<th class='num'>数量</th><th class='num'>价格</th>"
-                "<th class='num'>金额</th><th>对应信号</th></tr>"
-                f"{rows}</table>"
-            )
-
-            pnl_net   = review.get("pnl_realized_net",   0.0)
-            pnl_gross = review.get("pnl_realized_gross", 0.0)
-            pnl_fees  = review.get("pnl_fees",           0.0)
-            pnl_cls = "bull" if pnl_net > 0 else ("bear" if pnl_net < 0 else "neut")
-            pnl_word = "盈" if pnl_net > 0 else ("亏" if pnl_net < 0 else "持平")
-
-            # 持仓变化
-            pc = review.get("position_changes", {}) or {}
-            pc_html = ""
-            if pc:
-                pc_parts = [f"{tk} {init}→{final}" for tk, (init, final) in pc.items()]
-                pc_html = f"<p>持仓变化: {' / '.join(pc_parts)}</p>"
-
-            review_html += (
-                "<p><strong>你的操作:</strong></p>"
-                + trades_table
-                + pc_html
-                + f"<p>当日真实盈亏（FIFO,已扣手续费）: "
-                  f"<span class='{pnl_cls}'><strong>${pnl_net:+,.2f}</strong></span>"
-                  f"（{pnl_word},毛 ${pnl_gross:+,.2f} − 费 ${pnl_fees:.2f}）</p>"
-            )
-            for w in (review.get("fifo_warnings") or [])[:3]:
-                review_html += f"<p class='bear' style='font-size:12px'>⚠️ {w}</p>"
-        else:
-            review_html += "<p class='neut'>昨日无成交</p>"
-
-        # 错过的强信号
-        if review.get("missed"):
-            miss_rows = ""
-            for m in review["missed"][:5]:
-                ts = m.get("ts", "")[11:19]
-                short = m.get("ticker", "").replace("US.", "")
-                miss_rows += f"<li>{ts}  {short}  {m.get('trigger')} ({m.get('strength')})</li>"
-            review_html += f"<p style='margin-top:8px'><strong>错过的强信号:</strong></p><ul>{miss_rows}</ul>"
-
-        # 评分
-        s = review["scores"]
-        def _stars(n):
-            return "★" * n + "☆" * (5 - n)
-        review_html += (
-            "<p style='margin-top:8px'><strong>行为评分:</strong></p>"
-            "<table>"
-            f"<tr><td>执行力</td><td>{_stars(s['execution'])}</td></tr>"
-            f"<tr><td>止盈纪律</td><td>{_stars(s['profit_discipline'])}</td></tr>"
-            f"<tr><td>追高克制</td><td>{_stars(s['chase_restraint'])}</td></tr>"
-            "</table>"
-        )
-
-        if review.get("tips"):
-            review_html += "<p style='margin-top:8px'><strong>下次改进:</strong></p><ul>"
-            for tip in review["tips"]:
-                review_html += f"<li>{tip}</li>"
-            review_html += "</ul>"
-    else:
-        review_html = "<p class='neut'>昨日无操作</p>"
+    # ══ 板块 5: 昨日操作复盘 ══  [DISABLED] 已删除该板块 ══════════
+    # 停用昨日操作复盘 — 等信号匹配逻辑修好后再恢复
+    # | yesterday-review section removed until signal-match fix
 
     # ══ 组装 ══════════════════════════════════════════════
     body = (
@@ -2065,8 +1934,6 @@ def format_briefing_html(ticker: str, ind: dict, bias: dict, levels: dict,
 
         f"<div class='card'><h2>🧭 今日策略</h2>"
         f"{consensus_html}<hr>{strat_html}</div>"
-
-        f"<div class='card'><h2>📋 昨日操作复盘</h2>{review_html}</div>"
 
         f"<div class='meta' style='text-align:center;margin-top:16px'>"
         f"/detail {ticker} &nbsp; /ask {ticker} 你的问题</div>"
@@ -2101,13 +1968,17 @@ def main():
     print(f"  偏向: {bias['label']} ({bias['score']}/12)  "
           f"压力 {levels.get('resistance',[])}  支撑 {levels.get('support',[])}")
 
-    # ── 2. TradingAgents AI ───────────────────────────────────────
-    print(f"\n  [2/4] 读取 TradingAgents 报告...")
-    ta = load_trading_agents(TICKER)
-    if ta.get("found"):
-        print(f"  {ta['date']} → {ta['decision']} ({ta['decision_label']})")
-    else:
-        print("  未找到报告，跳过")
+    # ── 2. TradingAgents AI ──  [DISABLED] 停用 TradingAgents ─────
+    # 等信号匹配逻辑修好后再重新启用 | re-enable after signal-match fix
+    # print(f"\n  [2/4] 读取 TradingAgents 报告...")
+    # ta_running = start_tradingagents_background(TICKER)
+    # ta = load_trading_agents(TICKER)
+    # ta["running"] = ta_running
+    # if ta.get("found"):
+    #     print(f"  {ta['date']} → {ta['decision']} ({ta['decision_label']})")
+    # else:
+    #     print("  未找到报告，跳过")
+    ta = {"found": False, "running": False}  # [DISABLED] TA 停用占位
 
     # ── 3. 期权数据（Futu OpenAPI）────────────────────────────────
     print(f"\n  [3/6] 拉取 {TICKER} 期权数据（Futu OpenAPI）...")
@@ -2118,13 +1989,16 @@ def main():
     live  = _fetch_live_context(TICKER)
     strat = _build_strategy(bias, ind, levels, live, TICKER)
 
-    # ── 5. 昨日操作复盘（墨尔本昨日成交 + 信号匹配）───────────────
-    print(f"\n  [5/6] 拉取昨日操作复盘...")
-    y_date_str = _melbourne_yesterday_str()
-    y_deals    = _fetch_history_deals(y_date_str)
-    y_triggers = _load_yesterday_triggers(y_date_str)
-    review     = _build_yesterday_review(y_date_str, y_deals, y_triggers) \
-                 if (y_deals or y_triggers) else None
+    # ── 5. 昨日操作复盘 ──  [DISABLED] 停用昨日操作复盘 ───────────
+    # 订单读取 + 信号对比逻辑暂停，等信号匹配逻辑修好后再启用
+    # | order read + signal-match disabled until signal-match fix
+    # print(f"\n  [5/6] 拉取昨日操作复盘...")
+    # y_date_str = _melbourne_yesterday_str()
+    # y_deals    = _fetch_history_deals(y_date_str)
+    # y_triggers = _load_yesterday_triggers(y_date_str)
+    # review     = _build_yesterday_review(y_date_str, y_deals, y_triggers) \
+    #              if (y_deals or y_triggers) else None
+    review = None  # [DISABLED] 昨日操作复盘停用占位
 
     # 旧字段兼容（其他代码可能引用）
     yesterday = load_yesterday_summary()

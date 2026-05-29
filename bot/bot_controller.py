@@ -51,7 +51,10 @@ Owner: Zhen Yang
 """
 
 import json, os, sys, time, subprocess, threading, re
-sys.path.insert(0, r"C:\MagicQuant")
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from config.settings import (
     TG_BOT_TOKEN as BOT_TOKEN, TG_CHAT_ID as CHAT_ID,
@@ -64,6 +67,14 @@ from config.settings import (
 from version import get_logo, get_changelog_text, get_version_string, APP_NAME_CN, APP_NAME_EN, VERSION
 from i18n import t, set_lang
 set_lang(LANGUAGE)
+
+try:
+    from core.focus.kline_display import format_kline_source_line, format_subscription_detail
+except Exception:
+    def format_kline_source_line(*args, **kwargs):
+        return "🕐 K_5M last: —"
+    def format_subscription_detail(*args, **kwargs):
+        return None
 
 BOT_CONTROLLER_VERSION = "v0.5.13"
 BOT_CONTROLLER_DATE    = "2026-04-23"
@@ -123,6 +134,11 @@ try:
         from core.focus import manual_consult, HAS_MANUAL_CONSULT
     except ImportError:
         HAS_MANUAL_CONSULT = False
+    # v0.5.36: AI 临时判盘 / one-shot AI judge
+    try:
+        from core.focus import run_ai_judge, HAS_AI_JUDGE
+    except ImportError:
+        HAS_AI_JUDGE = False
     # v0.3.6: 心跳监控
     try:
         from core.focus import (
@@ -139,6 +155,7 @@ except ImportError as e:
     HAS_FOCUS = False
     HAS_AI_ADVISOR = False
     HAS_MANUAL_CONSULT = False
+    HAS_AI_JUDGE = False
     HAS_HEARTBEAT = False
     print(f"  [warn] core.focus not available: {e}")
 
@@ -222,7 +239,7 @@ def load_usage():
     try:
         if os.path.exists(USAGE_FILE):
             return json.load(open(USAGE_FILE, encoding="utf-8"))
-    except:
+    except Exception:
         pass
     return {"month": "", "calls": 0, "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0, "history": []}
 
@@ -547,7 +564,7 @@ def handle_callback(callback_query, wl):
             "show_alert": "true",   # 弹出对话框，需手动关闭
         }).encode()
         urllib.request.urlopen(urllib.request.Request(url, data=cdata), timeout=5)
-    except:
+    except Exception:
         pass
 
     print(f"  CALLBACK: {data}")
@@ -659,9 +676,25 @@ def handle_callback(callback_query, wl):
                     send_tg(f"⏳ {ticker_cb} 分析中,{int(60-(now_ts-last_ts))}秒后再试")
                     return None
                 detail_cooldown[ticker_cb] = now_ts
-                send_tg(f"🧠 正在用 AI 分析 {ticker_cb},请稍候...")
+                send_tg(f"🧠 正在拉取同一份快照，请三路 AI 判盘 {ticker_cb}...")
                 try:
-                    return cmd_detail(ticker_cb)
+                    if not HAS_AI_JUDGE:
+                        return cmd_detail(ticker_cb)
+                    from core.focus.focus_manager import (
+                        _current_session, _indicators_cache_global,
+                    )
+                    if _current_session is None or not _current_session.active:
+                        send_tg("⚠️ 当前没有运行中的 Focus 盯盘，请先 /focus")
+                        return None
+                    run_ai_judge(
+                        session=_current_session,
+                        indicators_cache=_indicators_cache_global,
+                        client=get_quote_client() if HAS_REALTIME else None,
+                        ticker=ticker_cb,
+                        reason="按钮触发",
+                        send_tg_fn=send_tg,
+                    )
+                    return None
                 except Exception as e:
                     import traceback
                     send_tg(f"❌ AI 分析失败: {traceback.format_exc()[-300:]}")
@@ -695,7 +728,7 @@ def get_updates(offset=0):
         url  = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset={offset}&timeout=30"
         resp = urllib.request.urlopen(url, timeout=35)
         return json.loads(resp.read()).get("result", [])
-    except:
+    except Exception:
         return []
 
 
@@ -739,7 +772,7 @@ def load_signals():
         for s in data.get("signals", []):
             s["indicator_at"] = generated_at
         return data
-    except:
+    except Exception:
         return None
 
 
@@ -904,7 +937,7 @@ def load_watchlist():
     try:
         if os.path.exists(WATCHLIST_FILE):
             return json.load(open(WATCHLIST_FILE, encoding="utf-8"))
-    except:
+    except Exception:
         pass
     default = {"auto": [], "manual": ["US.RKLB", "US.RKLX", "US.TSLA", "US.SOXL"]}
     save_watchlist(default)
@@ -919,7 +952,7 @@ def save_watchlist(wl):
 def load_account_data():
     try:
         return json.load(open(ACCOUNT_FILE, encoding="utf-8"))
-    except:
+    except Exception:
         return None
 
 
@@ -936,7 +969,7 @@ def safe_float(val, default=0):
     try:
         v = float(val)
         return v if v == v else default  # NaN check
-    except:
+    except Exception:
         return default
 
 
@@ -1069,7 +1102,7 @@ def fmt_signal(s, idx=None):
             if " " in ts:
                 return ts.split(" ")[-1][:8]
             return ts[-8:]
-        except:
+        except Exception:
             return "?"
 
     price_time_short = _short_time(price_at)
@@ -1244,6 +1277,7 @@ def cmd_detail(ticker_raw, force_refresh=False):
     # v0.5.22: 信心→仓位比例（与主信号推送对齐）
     # 优先读 Focus session cash（无 API 调用），失败则用配置默认值
     _detail_cash = None
+    _fs = None
     try:
         from core.focus.focus_manager import get_current_session as _gcs
         _fs = _gcs()
@@ -1284,6 +1318,8 @@ def cmd_detail(ticker_raw, force_refresh=False):
     sl_mult = "1.0×ATR" if style == "daytrader" else "1.5×ATR"
     t1_mult = "1.5×ATR" if style == "daytrader" else "2.0×ATR"
     t2_mult = "2.5×ATR" if style == "daytrader" else "3.5×ATR"
+    _kline_line = format_kline_source_line(session=_fs, indicators=ind)
+    _sub_line = format_subscription_detail(getattr(_fs, "_kline_subscription_detail", None) if _fs else None)
 
     lines += [
         "",
@@ -1296,6 +1332,7 @@ def cmd_detail(ticker_raw, force_refresh=False):
         f"{t('bb_upper') if ind['pct_b']>0.8 else t('bb_lower') if ind['pct_b']<0.2 else t('bb_mid')}",
         f"量比（相对均量）:  {ind['vol_ratio']}x  "
         f"{t('vol_high') if ind['vol_ratio']>1.3 else t('vol_low') if ind['vol_ratio']<0.7 else t('vol_normal')}",
+        _kline_line,
         f"ATR 平均真实波幅:  {atr}",
         f"MA5  (5日均线):    {ind.get('ma5', '?')}",
         f"MA10 (10日均线):   {ind.get('ma10', '?')}",
@@ -1314,6 +1351,8 @@ def cmd_detail(ticker_raw, force_refresh=False):
         f"  (可用现金 ${_detail_cash:,.0f} × {int(_pos_pct * 100)}%)",
         "",
     ]
+    if _sub_line:
+        lines.insert(lines.index(_kline_line) + 1, _sub_line)
 
     for p in s.get("candlestick_patterns", []):
         lines.append(t("candlestick", name=p["name"], desc=p["desc"]))
@@ -1371,7 +1410,7 @@ def cmd_detail(ticker_raw, force_refresh=False):
                             cached_claude = entry.get("text")
                         else:
                             cached_openai = entry.get("text")
-            except:
+            except Exception:
                 pass
 
         # 有缓存：直接推送，告知用户
@@ -1435,7 +1474,7 @@ def cmd_detail(ticker_raw, force_refresh=False):
                     if cash > 0:
                         cash_resolved = cash
                         cash_source = "json_snapshot"
-            except:
+            except Exception:
                 pass
 
         if cash_resolved is not None and cash_resolved > 0:
@@ -1651,7 +1690,7 @@ def _build_risk_status_text() -> str:
                     code = r.get("primary_reason_code", "?")
                     emoji = {"pass":"✅","advisory":"💡","warn":"⚠️","block":"❌"}.get(sev, "?")
                     lines.append(f"  {emoji} {tk} · {code}")
-        except:
+        except Exception:
             pass
 
     lines.append("")
@@ -1715,7 +1754,8 @@ def cmd_help(args=None):
         "/ai_advise_on      开启智囊团(默认开)\n"
         "/ai_advise_off     关闭智囊团\n"
         "/ai_advise_status  查看状态\n"
-        "/ai_test [原因]    🆕 主动召集(不等触发)\n\n"
+        "/ai_test [原因]    🆕 主动召集(不等触发)\n"
+        "/ai_judge [代码]    🧠 三路 AI 临时判盘(K_1M+K_5M)\n\n"
 
         "💓 心跳监控(v0.3.6)\n"
         "/heartbeat         立即看系统在干什么\n"
@@ -2367,7 +2407,7 @@ def cmd_summary():
     notes_file = os.path.join(BASE_DIR, "data", "dev_notes.json")
     try:
         notes = json.load(open(notes_file, encoding="utf-8"))
-    except:
+    except Exception:
         return "暂无开发笔记，请确认 data/dev_notes.json 存在。"
 
     lines = [
@@ -2597,7 +2637,7 @@ def handle_document(msg: dict):
     finally:
         try:
             os.remove(tmp_path)
-        except:
+        except Exception:
             pass
 
     if not result or "error" in result:
@@ -2662,6 +2702,20 @@ def handle(text, wl):
     if cmd == "list":            return cmd_list(wl)
     if cmd == "signal":          return cmd_signal(args, wl)
 
+    if cmd in ("review_signals", "review_signal", "review"):
+        date_str = args[0] if args else datetime.now().strftime("%Y-%m-%d")
+        try:
+            from scripts.review_signal_coverage import (
+                build_review,
+                format_telegram_summary,
+                save_report,
+            )
+            review = build_review(date_str)
+            report_path = save_report(review)
+            return format_telegram_summary(review) + f"\n\nMD: {report_path}"
+        except Exception as e:
+            return f"❌ 复盘失败: {e}"
+
     if cmd == "order":
         if not args:
             return "用法: /order TICKER\n例如: /order RKLZ"
@@ -2696,13 +2750,13 @@ def handle(text, wl):
         try:
             from core.focus.market_clock import format_market_status
             lines += ["", format_market_status()]
-        except:
+        except Exception:
             pass
         # v0.5.11 新增:当前 profile 行
         try:
             from core.focus.activity_profile import format_profile_line
             lines.append(format_profile_line())
-        except:
+        except Exception:
             pass
         return "\n".join(lines)
 
@@ -2830,6 +2884,39 @@ def handle(text, wl):
     # v0.3.6: 手动召集智囊团 + 心跳监控
     # ════════════════════════════════════════════════════════
 
+    if cmd in ("ai_judge", "judge"):
+        if not HAS_AI_JUDGE:
+            return "❌ AI 临时判盘模块未加载 (core/focus/ai_judge.py)"
+        if not HAS_FOCUS:
+            return "❌ Focus 模块未加载"
+        try:
+            from core.focus.focus_manager import (
+                _current_session, _indicators_cache_global,
+            )
+        except ImportError:
+            return "❌ 无法读取 Focus session 状态"
+
+        if _current_session is None or not _current_session.active:
+            return "⚠️ 当前没有运行中的 Focus 盯盘，请先 /focus 启动"
+
+        ticker_j = args[0].upper() if args else _current_session.master.replace("US.", "")
+        reason = " ".join(args[1:]) if len(args) > 1 else "手动请求"
+        send_tg(f"🧠 正在拉取同一份快照，请三路 AI 判盘 {ticker_j}...")
+        try:
+            run_ai_judge(
+                session=_current_session,
+                indicators_cache=_indicators_cache_global,
+                client=get_quote_client() if HAS_REALTIME else None,
+                ticker=ticker_j,
+                reason=reason,
+                send_tg_fn=send_tg,
+            )
+            return None
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return f"❌ AI 判盘失败: {str(e)[:150]}"
+
     if cmd == "ai_test":
         if not HAS_MANUAL_CONSULT:
             return "❌ 手动召集模块未加载 (core/focus/manual_consult.py)"
@@ -2882,7 +2969,7 @@ def handle(text, wl):
         if args:
             try:
                 interval = int(args[0])
-            except:
+            except Exception:
                 return "❌ 用法: /heartbeat_on [分钟],比如 /heartbeat_on 15"
         return start_heartbeat_loop(send_tg, interval)
 
@@ -2959,7 +3046,7 @@ def handle(text, wl):
         if args:
             try:
                 days = max(1, min(int(args[0]), 30))
-            except:
+            except Exception:
                 pass
         try:
             stats = risk_compute_stats(days=days)
@@ -2990,8 +3077,9 @@ def handle(text, wl):
             stop   = float(args[3])
             target = float(args[4])
 
-            # 从当前 Focus session 拉 context(如果可用)
-            ctx = {"pdt_used": 0, "cash": 18000, "confidence": 0.72,
+            # 从当前 Focus session / Futu 真实账户拉 context
+            # Read risk context from Focus session / real Futu USD account.
+            ctx = {"pdt_used": 0, "cash": 0, "confidence": 0.72,
                    "market_session": "main"}
             try:
                 from core.focus.focus_manager import _current_session
@@ -2999,8 +3087,19 @@ def handle(text, wl):
                     ctx["positions"] = dict(
                         _current_session.positions_snapshot or {}
                     )
-            except:
-                pass
+                    if _current_session.cash_available is not None:
+                        ctx["cash"] = float(_current_session.cash_available)
+            except Exception as e:
+                print(f"  [risk_check] focus context unavailable: {e}")
+
+            if ctx["cash"] <= 0 and HAS_REALTIME:
+                try:
+                    client = get_quote_client()
+                    acc = client.fetch_account()
+                    if acc and acc.get("cash") is not None:
+                        ctx["cash"] = float(acc["cash"])
+                except Exception as e:
+                    print(f"  [risk_check] fetch_account failed: {e}")
 
             result = can_trade(
                 action_type="new_entry",
@@ -3012,7 +3111,7 @@ def handle(text, wl):
             # 写日志
             try:
                 log_risk_check(result, ctx)
-            except:
+            except Exception:
                 pass
             return format_result_for_tg(result, verbose=True)
         except Exception as e:
@@ -3029,7 +3128,7 @@ def handle(text, wl):
         if args:
             try:
                 interval = max(30, int(args[0]))
-            except:
+            except Exception:
                 pass
         return race_start(send_tg_fn=send_tg, interval=interval)
 
@@ -3090,7 +3189,7 @@ def handle(text, wl):
                 "请在 .env 文件配置以下任一 API Key:\n"
                 "• ANTHROPIC_API_KEY  (Claude)\n"
                 "• OPENAI_API_KEY     (GPT-5)\n"
-                "• DEEPSEEK_API_KEY   (DeepSeek V3)\n"
+                "• DEEPSEEK_API_KEY   (DeepSeek V4 Pro)\n"
                 "• MOONSHOT_API_KEY   (Kimi K2)"
             )
         lines = ["✅ 可用的 AI Providers:"]
@@ -3358,7 +3457,7 @@ def _last_us_trading_day_str() -> str:
 def _startup_briefing_worker():
     """后台线程: 顺序补跑 TradingAgents → daily_briefing"""
     from pathlib import Path
-    base = Path(r"C:\MagicQuant")
+    base = Path(BASE_DIR)
     py_exe = sys.executable
 
     # ── 1. TradingAgents 分析 ──────────────────────────
@@ -3369,21 +3468,7 @@ def _startup_briefing_worker():
     if ta_report.exists():
         print(f"  [startup] TradingAgents 报告已存在 ({ta_date})，跳过")
     else:
-        print(f"  [startup] TradingAgents 报告缺失 ({ta_date})，开始分析...")
-        send_tg(f"🤖 启动检测: TradingAgents {ta_date} 缺失，后台开始分析...")
-        try:
-            r = subprocess.run(
-                [py_exe, str(base / "run_ta_daily.py")],
-                cwd=str(base), timeout=1800,
-            )
-            if r.returncode == 0:
-                print(f"  [startup] TradingAgents 完成 ({ta_date})")
-            else:
-                send_tg(f"⚠️ TradingAgents 退出码 {r.returncode}")
-        except subprocess.TimeoutExpired:
-            send_tg("⚠️ TradingAgents 超时 (30 min)，已终止")
-        except Exception as e:
-            send_tg(f"⚠️ TradingAgents 启动失败: {e}")
+        print(f"  [startup] TradingAgents report missing ({ta_date}); daily_briefing will start it in background")
 
     # ── 2. 开盘简报 ──────────────────────────────────
     mel_today = _melbourne_today().strftime("%Y%m%d")
@@ -3394,16 +3479,11 @@ def _startup_briefing_worker():
     else:
         print(f"  [startup] 开盘简报缺失 ({mel_today})，开始生成...")
         try:
-            r = subprocess.run(
+            proc = subprocess.Popen(
                 [py_exe, str(base / "root" / "daily_briefing.py")],
-                cwd=str(base), timeout=300,
+                cwd=str(base),
             )
-            if r.returncode == 0:
-                print(f"  [startup] 开盘简报完成 ({mel_today})")
-            else:
-                send_tg(f"⚠️ daily_briefing 退出码 {r.returncode}")
-        except subprocess.TimeoutExpired:
-            send_tg("⚠️ daily_briefing 超时 (5 min)，已终止")
+            print(f"  [startup] daily_briefing started in background pid={proc.pid} ({mel_today})")
         except Exception as e:
             send_tg(f"⚠️ daily_briefing 启动失败: {e}")
 
@@ -3412,7 +3492,7 @@ def _startup_briefing_worker():
 def _ta_version_check_due() -> bool:
     """距上次检查 ≥ 7 天才执行"""
     from pathlib import Path
-    cache = Path(r"C:\MagicQuant") / "data" / "ta_version_check.json"
+    cache = Path(BASE_DIR) / "data" / "ta_version_check.json"
     if not cache.exists():
         return True
     try:
@@ -3424,7 +3504,7 @@ def _ta_version_check_due() -> bool:
 
 def _ta_version_check_save(local_sha: str, upstream_sha: str):
     from pathlib import Path
-    cache = Path(r"C:\MagicQuant") / "data" / "ta_version_check.json"
+    cache = Path(BASE_DIR) / "data" / "ta_version_check.json"
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text(json.dumps({
         "last_check_ts": time.time(),
@@ -3442,7 +3522,7 @@ def _ta_version_check_worker():
         print("  [ta-version] 距上次检查 < 7 天，跳过")
         return
 
-    ta_dir = Path(r"C:\MagicQuant") / "TradingAgents"
+    ta_dir = Path(BASE_DIR) / "TradingAgents"
     if not (ta_dir / ".git").exists():
         print("  [ta-version] TradingAgents 非 git 仓库，跳过")
         return
@@ -3538,7 +3618,7 @@ def main():
         from core.focus.market_clock import format_market_status, get_market_status as _gms
         startup_lines.append(format_market_status())
         _startup_mkt = _gms()
-    except:
+    except Exception:
         _startup_mkt = None
 
     startup_lines += [
@@ -3551,6 +3631,8 @@ def main():
         startup_lines.append("💓 /heartbeat 实时状态")
     if HAS_MANUAL_CONSULT:
         startup_lines.append("🤖 /ai_test 主动召集 AI 智囊团")
+    if HAS_AI_JUDGE:
+        startup_lines.append("🧠 /ai_judge 三路 AI 临时判盘")
     startup_lines.append("")
     startup_lines.append("发送 /help 查看所有指令  ·  /modules 查看版本")
 
@@ -3701,13 +3783,13 @@ def main():
             if HAS_FOCUS and is_focused():
                 try:
                     focus_stop()
-                except:
+                except Exception:
                     pass
             # 🆕 清理 Futu 连接(v0.2.1)
             if HAS_REALTIME:
                 try:
                     close_quote_client()
-                except:
+                except Exception:
                     pass
             break
         except Exception as e:
