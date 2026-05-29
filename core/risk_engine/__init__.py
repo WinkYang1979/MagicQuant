@@ -18,7 +18,7 @@ Dare to dream. Data to win.
         direction="long",
         context={
             "pdt_used": 1,
-            "cash": 18000,
+            "cash": fetch_account()["cash"],  # 使用真实 USD 现金 / Use real USD cash
             "daily_pnl": -45,
             "confidence": 0.72,
             "positions": {...},

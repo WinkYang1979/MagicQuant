@@ -1,24 +1,34 @@
 """
 MagicQuant 慧投 - Signal Engine v0.1.0
+VERSION : v0.1.1
+DEPENDS : config.settings, core.realtime_quote, Futu/Moomoo OpenAPI
+
 Dare to dream. Data to win.
 
 # [LEGACY] research-only, disabled by default
 # 正式信号链路已迁移至 core/focus/ (swing_detector + pusher + focus_manager)
 # 本模块仅保留作回测/研究用途，不推送 Telegram 信号
 
-Run: python core\signal_engine.py --once
+Run: python core\\signal_engine.py --once
 """
 
 import argparse, json, os, sys, time
 from datetime import datetime
 import pandas as pd
 import numpy as np
+from config.settings import (
+    ACCOUNT_SIZE as FALLBACK_ACCOUNT_SIZE,
+    BASE_DIR,
+    FUTU_HOST,
+    FUTU_PORT,
+)
+from core.realtime_quote import QuoteClient
 
 # ── Config ────────────────────────────────────────────────────────
-_BASE_DIR    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HOST         = "127.0.0.1"
-PORT         = 11111
-ACCOUNT_SIZE = 20000  # [LEGACY] 仅供研究参考，不用于真实仓位计算
+_BASE_DIR    = BASE_DIR
+HOST         = FUTU_HOST
+PORT         = FUTU_PORT
+ACCOUNT_SIZE = FALLBACK_ACCOUNT_SIZE  # [LEGACY] 仅供研究兜底，不用于真实仓位计算
 KL_NUM       = 90
 SIGNALS_FILE = os.path.join(_BASE_DIR, "data", "signals_latest.json")
 WATCHLIST    = os.path.join(_BASE_DIR, "config", "watchlist.json")
@@ -143,11 +153,15 @@ def calc_stop_targets(price, signal, atr, style):
     return {"stop_loss": sl, "target1": t1, "target2": t2, "risk_per_share": round(abs(price-sl), 2)}
 
 
-def calc_position_size(price, stop_loss):
+def calc_position_size(price, stop_loss, available_cash=None):
     rps = abs(price - stop_loss)
-    if rps == 0: return 0
-    shares = int(ACCOUNT_SIZE * 0.05 / rps)
-    return max(0, min(shares, int(ACCOUNT_SIZE * 0.3 / price)))
+    cash = float(available_cash or 0)
+    if cash <= 0:
+        cash = ACCOUNT_SIZE
+    if rps == 0 or price <= 0:
+        return 0
+    shares = int(cash * 0.05 / rps)
+    return max(0, min(shares, int(cash * 0.3 / price)))
 
 
 def generate_signal(rsi, macd_hist, pct_b, vol_ratio, mas, patterns):
@@ -189,6 +203,15 @@ def generate_signal(rsi, macd_hist, pct_b, vol_ratio, mas, patterns):
     return signal, confidence, reasons, min(5, urgency)
 
 
+def _fetch_usd_account_with_client():
+    """用统一客户端读取 USD 账户 / Read account through the USD-safe helper."""
+    client = QuoteClient(host=HOST, port=PORT)
+    try:
+        return client.fetch_account() or {}
+    finally:
+        client.close()
+
+
 def get_positions(trd_ctx):
     """查询持仓和账户信息，复用外部传入的 trd_ctx，不自行管理连接生命周期"""
     positions = {}
@@ -207,21 +230,15 @@ def get_positions(trd_ctx):
                     "pl_val": round(pl, 2),
                     "pl_pct": round(pl/(cost*qty)*100, 2) if cost*qty > 0 else 0
                 }
-        ret2, acc = trd_ctx.accinfo_query(trd_env=TrdEnv.REAL)
-        if ret2 == RET_OK and len(acc) > 0:
-            row = acc.iloc[0]
-            account_info = {
-                "cash": round(float(row.get("cash", 0)), 2),
-                "total_assets": round(float(row.get("total_assets", 0)), 2),
-                "market_val": round(float(row.get("market_val", 0)), 2),
-            }
+        account_info = _fetch_usd_account_with_client()
+        if account_info:
             print(f"  账户: 现金=${account_info['cash']:,.2f} 总资产=${account_info['total_assets']:,.2f}")
     except Exception as e:
         print(f"  持仓查询: {e}")
     return positions, account_info
 
 
-def fetch_and_analyze(quote_ctx, ticker, positions):
+def fetch_and_analyze(quote_ctx, ticker, positions, account_info=None):
     result = {"ticker": ticker}
     cfg = TICKER_CONFIG.get(ticker, {"name": ticker, "style": "swing"})
     result["name"] = cfg["name"]
@@ -265,7 +282,8 @@ def fetch_and_analyze(quote_ctx, ticker, positions):
         rsi, macd_hist, pct_b, vol_ratio, mas, patterns)
 
     risk = calc_stop_targets(price, signal, atr, cfg["style"])
-    suggested_shares = calc_position_size(price, risk["stop_loss"])
+    available_cash = (account_info or {}).get("cash")
+    suggested_shares = calc_position_size(price, risk["stop_loss"], available_cash)
     position = positions.get(ticker)
     # 无持仓时填空结构，保证 JSON 里始终有 position 字段
     if position is None:
@@ -354,7 +372,7 @@ def main(run_once=False, interval=300):
             if positions:
                 print(f"  Positions: {list(positions.keys())}")
             tickers = get_tickers(positions)
-            results = [fetch_and_analyze(quote_ctx, t, positions) for t in tickers]
+            results = [fetch_and_analyze(quote_ctx, t, positions, account_info) for t in tickers]
             print_report(results)
             save_json(results, account_info)
             if run_once: break

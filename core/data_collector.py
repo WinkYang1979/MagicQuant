@@ -3,10 +3,17 @@ futu_data_collector.py - 全量数据采集器
 一次性拉取所有有用的 Futu/Moomoo 数据，保存到 account_data.json
 包含：账户信息、持仓、今日订单、历史订单、成交记录、资金流水、行情快照
 
+VERSION : v0.2.2
+DEPENDS : config.settings, Futu/Moomoo OpenAPI
+
 Run: python futu_data_collector.py
 """
 
 import json, os
+import sys
+import urllib.parse
+import urllib.request
+from pathlib import Path
 from datetime import datetime, timedelta
 
 try:
@@ -24,19 +31,45 @@ except ImportError:
         Market, SecurityType, SecurityFirm
     )
 
-HOST     = "127.0.0.1"
-PORT     = 11111
-import sys
-sys.path.insert(0, r"C:\MagicQuant")
-from config.settings import ACCOUNT_FILE as OUT_FILE, FUTU_HOST as HOST, FUTU_PORT as PORT, DEFAULT_WATCHLIST as TICKERS
-TICKERS  = ["US.TSLA", "US.SOXL", "US.RKLB", "US.RKLX"]
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+from config.settings import (
+    ACCOUNT_FILE as OUT_FILE,
+    FUTU_HOST as HOST,
+    FUTU_PORT as PORT,
+    DEFAULT_WATCHLIST,
+    TG_BOT_TOKEN,
+    TG_CHAT_ID,
+)
+TICKERS = list(DEFAULT_WATCHLIST)
 
 
-def safe(fn, label=""):
+def send_tg_alert(text: str) -> None:
+    """发送关键采集告警 / Send critical collector alert."""
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        return
     try:
-        return fn()
+        data = urllib.parse.urlencode({
+            "chat_id": TG_CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML",
+        }).encode()
+        url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+        urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=8)
     except Exception as e:
+        print(f"  [collector] Telegram alert failed: {e}")
+
+
+def safe(fn, label="", critical=False):
+    try:
+        data = fn()
+        print(f"  [{label}] 获取成功 / fetch ok")
+        return data
+    except Exception as e:
+        msg = f"⚠️ 数据获取异常: {label} - {e}"
         print(f"  [{label}] Error: {e}")
+        if critical:
+            send_tg_alert(f"{msg}\n\n结论: 关键数据没有更新，请检查 Futu OpenD 连接。")
         return None
 
 
@@ -48,7 +81,7 @@ def collect_account(trd_ctx):
     """
     ret, data = trd_ctx.accinfo_query(trd_env=TrdEnv.REAL, refresh_cache=True)
     if ret != RET_OK or len(data) == 0:
-        return {}
+        raise RuntimeError(f"accinfo_query failed: {data}")
     row = data.iloc[0]
 
     # 存全部原始字段
@@ -57,7 +90,7 @@ def collect_account(trd_ctx):
         try:
             val = row[col]
             result[col] = float(val) if hasattr(val, '__float__') else str(val)
-        except:
+        except Exception:
             result[col] = str(row[col])
 
     def _fv(*keys, default=0.0):
@@ -99,7 +132,9 @@ def collect_account(trd_ctx):
 def collect_positions(trd_ctx):
     """当前持仓"""
     ret, data = trd_ctx.position_list_query(trd_env=TrdEnv.REAL)
-    if ret != RET_OK or len(data) == 0:
+    if ret != RET_OK:
+        raise RuntimeError(f"position_list_query failed: {data}")
+    if len(data) == 0:
         return []
     positions = []
     for _, row in data.iterrows():
@@ -108,7 +143,7 @@ def collect_positions(trd_ctx):
             try:
                 val = row[col]
                 pos[col] = float(val) if hasattr(val, '__float__') else str(val)
-            except:
+            except Exception:
                 pos[col] = str(row[col])
         positions.append(pos)
         print(f"  持仓: {pos.get('code','')} {pos.get('qty',0)}股 "
@@ -129,7 +164,7 @@ def collect_today_orders(trd_ctx):
             try:
                 val = row[col]
                 order[col] = float(val) if hasattr(val, '__float__') else str(val)
-            except:
+            except Exception:
                 order[col] = str(row[col])
         orders.append(order)
     print(f"  今日订单: {len(orders)} 条")
@@ -154,7 +189,7 @@ def collect_history_orders(trd_ctx, days=30):
             try:
                 val = row[col]
                 order[col] = float(val) if hasattr(val, '__float__') else str(val)
-            except:
+            except Exception:
                 order[col] = str(row[col])
         orders.append(order)
     print(f"  历史订单（近{days}天）: {len(orders)} 条")
@@ -173,7 +208,7 @@ def collect_today_deals(trd_ctx):
             try:
                 val = row[col]
                 deal[col] = float(val) if hasattr(val, '__float__') else str(val)
-            except:
+            except Exception:
                 deal[col] = str(row[col])
         deals.append(deal)
     print(f"  今日成交: {len(deals)} 条")
@@ -198,7 +233,7 @@ def collect_history_deals(trd_ctx, days=30):
             try:
                 val = row[col]
                 deal[col] = float(val) if hasattr(val, '__float__') else str(val)
-            except:
+            except Exception:
                 deal[col] = str(row[col])
         deals.append(deal)
     print(f"  历史成交（近{days}天）: {len(deals)} 条")
@@ -224,7 +259,7 @@ def collect_cash_flow(trd_ctx, days=30):
                 try:
                     val = row[col]
                     flow[col] = float(val) if hasattr(val, '__float__') else str(val)
-                except:
+                except Exception:
                     flow[col] = str(row[col])
             flows.append(flow)
         print(f"  资金流水（近{days}天）: {len(flows)} 条")
@@ -238,7 +273,7 @@ def collect_market_snapshot(quote_ctx, tickers):
     """行情快照"""
     ret, data = quote_ctx.get_market_snapshot(tickers)
     if ret != RET_OK:
-        return {}
+        raise RuntimeError(f"get_market_snapshot failed: {data}")
     snapshots = {}
     for _, row in data.iterrows():
         code = str(row.get("code", ""))
@@ -247,7 +282,7 @@ def collect_market_snapshot(quote_ctx, tickers):
             try:
                 val = row[col]
                 snap[col] = float(val) if hasattr(val, '__float__') else str(val)
-            except:
+            except Exception:
                 snap[col] = str(row[col])
         snapshots[code] = snap
         print(f"  快照: {code} ${snap.get('last_price',0):.2f} "
@@ -272,7 +307,7 @@ def collect_stock_basicinfo(quote_ctx, tickers):
                     try:
                         val = row[col]
                         info[col] = float(val) if hasattr(val, '__float__') else str(val)
-                    except:
+                    except Exception:
                         info[col] = str(row[col])
                 basicinfo[code] = info
 
@@ -289,7 +324,7 @@ def collect_stock_basicinfo(quote_ctx, tickers):
                     try:
                         val = row[col]
                         info[col] = float(val) if hasattr(val, '__float__') else str(val)
-                    except:
+                    except Exception:
                         info[col] = str(row[col])
                 basicinfo[code] = info
 
@@ -366,7 +401,7 @@ def main():
     quote_ctx = OpenQuoteContext(host=HOST, port=PORT)
 
     result["market_snapshot"] = safe(
-        lambda: collect_market_snapshot(quote_ctx, TICKERS), "行情快照")
+        lambda: collect_market_snapshot(quote_ctx, TICKERS), "行情快照", critical=True)
     result["stock_basicinfo"] = safe(
         lambda: collect_stock_basicinfo(quote_ctx, TICKERS), "基本信息")
     result["order_book"] = safe(
@@ -378,8 +413,8 @@ def main():
     print("\n[ 账户数据 ]")
     trd_ctx = OpenSecTradeContext(host=HOST, port=PORT, filter_trdmarket=TrdMarket.US, security_firm=SecurityFirm.FUTUAU)
 
-    result["account"]          = safe(lambda: collect_account(trd_ctx),          "账户")
-    result["positions"]        = safe(lambda: collect_positions(trd_ctx),         "持仓")
+    result["account"]          = safe(lambda: collect_account(trd_ctx),          "账户", critical=True)
+    result["positions"]        = safe(lambda: collect_positions(trd_ctx),         "持仓", critical=True)
     result["today_orders"]     = safe(lambda: collect_today_orders(trd_ctx),      "今日订单")
     result["today_deals"]      = safe(lambda: collect_today_deals(trd_ctx),       "今日成交")
     result["history_orders"]   = safe(lambda: collect_history_orders(trd_ctx),    "历史订单")

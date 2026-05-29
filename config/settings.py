@@ -1,5 +1,8 @@
 """
 MagicQuant 慧投 — 全局配置
+VERSION : v0.2.2
+DEPENDS : .env
+
 Dare to dream. Data to win.
 
 说明：所有配置集中在此文件，修改后重启相关服务生效。
@@ -8,11 +11,14 @@ v0.2.1: 凭证迁移到 .env，不再明文硬编码
 import os
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 # ══════════════════════════════════════════════════════════════════
 #  加载 .env 凭证（不依赖 python-dotenv，手写避免增加依赖）
 # ══════════════════════════════════════════════════════════════════
-_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
-print(f"🔍 .env 路径: {_ENV_FILE}  存在: {_ENV_FILE.exists()}")
+_ENV_FILE = PROJECT_ROOT / ".env"
+if os.environ.get("MAGICQUANT_VERBOSE_CONFIG") == "1":
+    print(f"🔍 .env 路径: {_ENV_FILE}  存在: {_ENV_FILE.exists()}")
 if _ENV_FILE.exists():
     for line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -33,9 +39,14 @@ FUTU_HOST = "127.0.0.1"
 FUTU_PORT = 11111
 
 # ── 账户配置 ─────────────────────────────────────────────────────
-ACCOUNT_SIZE  = 20000   # 账户规模（用于仓位计算），请根据实际更新
-MAX_RISK_PCT  = 0.05    # 每笔最大风险比例 5%
-PDT_LIMIT     = 3       # PDT 限制次数（账户 < $25k 为 3）
+ACCOUNT_SIZE       = 20000   # 账户规模（研究兜底）/ Research fallback account size
+MAX_RISK_PCT       = 0.05    # 每笔最大风险比例 / Max risk per trade
+PDT_LIMIT          = 3       # PDT 限制次数 / PDT day-trade limit
+MIN_BUDGET_USD     = 2000    # 新开仓最低现金 / Minimum cash for new entries
+MIN_ADD_BUDGET_USD = 500     # 加仓最低现金 / Minimum cash for add-on entries
+ALLOW_ONE_CLICK_BUTTONS = os.getenv("ALLOW_ONE_CLICK_BUTTONS", "1").lower() not in ("0", "false", "no")
+ONE_CLICK_BUTTON_WARMUP_SEC = int(os.getenv("ONE_CLICK_BUTTON_WARMUP_SEC", "0"))
+SHOW_SUBSCRIPTION_DETAIL = os.getenv("SHOW_SUBSCRIPTION_DETAIL", "0").lower() in ("1", "true", "yes")
 
 # ── 语言设置 / Language ──────────────────────────────────────────
 # "zh" = 中文（默认）  |  "en" = English
@@ -94,7 +105,7 @@ BB_STD      = 2
 KL_NUM      = 90
 
 # ── 路径配置 ─────────────────────────────────────────────────────
-BASE_DIR      = r"C:\MagicQuant"
+BASE_DIR      = str(PROJECT_ROOT)
 DATA_DIR      = os.path.join(BASE_DIR, "data")
 CONFIG_DIR    = os.path.join(BASE_DIR, "config")
 LOG_DIR       = os.path.join(BASE_DIR, "logs")

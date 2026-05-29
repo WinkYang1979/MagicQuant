@@ -15,9 +15,11 @@ Owner: Zhen Yang
 """
 
 import json, os, sys, time
+from pathlib import Path
 from datetime import datetime, timedelta
 
-sys.path.insert(0, r"C:\MagicQuant")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 from config.settings import (
     BASE_DIR, SIGNALS_FILE, CLAUDE_API_KEY, CLAUDE_MODEL,
     CLAUDE_PRICE_IN, CLAUDE_PRICE_OUT

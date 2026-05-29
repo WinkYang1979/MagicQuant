@@ -17,6 +17,8 @@ Owner: Zhen Yang
 """
 
 import json, os, re
+import sys
+from pathlib import Path
 from datetime import datetime, date, timedelta
 
 try:
@@ -25,8 +27,8 @@ try:
 except ImportError:
     HAS_PDFPLUMBER = False
 
-import sys
-sys.path.insert(0, r"C:\MagicQuant")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 from config.settings import BASE_DIR
 
 STATEMENTS_DIR = os.path.join(BASE_DIR, "data", "statements")
