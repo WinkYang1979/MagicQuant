@@ -516,6 +516,9 @@ def _footer():
 
 def _manual_cmd_line(hit, session=None):
     trigger = hit.get("trigger")
+    # position_followup 自带 /detail 按钮, 不再重复"手动 /detail"文字行
+    if trigger == "position_followup":
+        return None
     ticker_short = hit.get("ticker", "").replace("US.", "")
     direction = hit.get("direction")
     cmds = []
@@ -2060,7 +2063,7 @@ def _fmt_position_followup(hit, session=None):
         conclusion = "结论: 反弹回到成本区,先看能否站稳成本上方。"
         action = "若 5m 内不能站稳成本上方,这次反弹大概率只是回抽。"
     elif state == "INVALIDATED":
-        title = f"🟥 <b>{ticker_short} 持仓方向失效</b>"
+        title = f"🟥 <b>{ticker_short} 持仓亮红灯，建议离场</b>"
         conclusion = "结论: 持仓假设已经失效,优先控制风险。"
         action = "依据: ATR 失效位/成本回测失败/短线结构转弱。"
     elif state == "DATA_UNTRUSTED":

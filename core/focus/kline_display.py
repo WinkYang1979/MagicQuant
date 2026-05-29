@@ -188,6 +188,10 @@ def inject_kline_source_line(text: str, session=None, indicators=None, hit=None,
     if not text or "K_5M last:" in text:
         return text
     line = format_kline_source_line(session=session, indicators=indicators, hit=hit, quality=quality)
+    # 仅在 K 线异常(数据过期 / 缺失)时显示, 供信号冻结诊断;
+    # 正常时不显示——首行状态灯已表明信号正常。Show only when stale/missing.
+    if "⚠️" not in line and "K_5M last: —" not in line:
+        return text
     lines = text.splitlines()
     for idx, existing in enumerate(lines):
         if any(token in existing for token in ("📊 指标", "5分钟指标", "RSI", "VWAP", "量比")):
