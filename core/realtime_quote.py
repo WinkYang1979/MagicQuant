@@ -1,9 +1,15 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant 慧投 — realtime_quote.py
-  VERSION : v0.5.6
-  DATE    : 2026-05-13
+  VERSION : v0.5.7
+  DATE    : 2026-05-14
   CHANGES :
+    v0.5.7 (2026-05-14):
+      - [FIX] fetch_one: update_time 解析支持带毫秒的时间戳
+              ("2026-05-14 09:30:00.488") — 先试 "%Y-%m-%d %H:%M:%S.%f"，
+              失败再退回 "%Y-%m-%d %H:%M:%S"，都失败才打印警告。
+              原单一格式遇毫秒直接抛 ValueError，age_sec 永远 -1。
+              | parse update_time with optional milliseconds
     v0.5.6 (2026-05-13):
       - [FIX] fetch_positions: pl_val/pl_pct 强制 (current-cost)×qty 自算
               原 broker pl_val 基于 cost_price(不含费),但显示用
@@ -39,8 +45,9 @@
 
 import time
 import threading
+import urllib.parse
+import urllib.request
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     from moomoo import (
@@ -53,7 +60,39 @@ except ImportError:
         RET_OK, TrdMarket, TrdEnv, Currency,
     )
 
-from config.settings import FUTU_HOST, FUTU_PORT
+from config.settings import FUTU_HOST, FUTU_PORT, TG_BOT_TOKEN, TG_CHAT_ID
+
+
+_ALERT_LAST: dict[str, float] = {}
+SNAPSHOT_CACHE_TTL_SEC = 10
+SNAPSHOT_STALE_TTL_SEC = 120
+SNAPSHOT_WINDOW_SEC = 30
+SNAPSHOT_WINDOW_LIMIT = 45
+
+
+def _push_data_warning(kind: str, detail: str, cooldown_sec: int = 900) -> None:
+    """关键数据失败告警 / Send throttled warning for critical data failures."""
+    now = time.time()
+    if now - _ALERT_LAST.get(kind, 0) < cooldown_sec:
+        return
+    _ALERT_LAST[kind] = now
+    msg = (
+        f"⚠️ 数据获取失败: {kind}\n"
+        f"原因: {detail}\n"
+        "结论: 关键行情/账户数据没有更新，先检查 Futu OpenD 连接和订阅状态。"
+    )
+    print(f"  [warn] {msg}")
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        return
+    try:
+        data = urllib.parse.urlencode({
+            "chat_id": TG_CHAT_ID,
+            "text": msg,
+        }).encode()
+        url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+        urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=8)
+    except Exception as e:
+        print(f"  [warn] Telegram data warning failed: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -157,6 +196,8 @@ class QuoteClient:
         self._lock        = threading.Lock()
         self._last_err_at = 0
         self._err_cooldown = 30
+        self._snapshot_cache = {}
+        self._snapshot_call_times = []
 
         # 暴露给 focus_manager._fetch_5m_kline
         self._quote_ctx  = None   # 同 self._ctx 的别名,建连后赋值
@@ -176,8 +217,8 @@ class QuoteClient:
             if self._ctx is not None:
                 try:
                     self._ctx.close()
-                except:
-                    pass
+                except Exception as e:
+                    print(f"  [Quote] close before reconnect failed: {e}")
             ctx = OpenQuoteContext(host=self.host, port=self.port)
             self._ctx         = ctx
             self._quote_ctx   = ctx   # 别名
@@ -188,6 +229,7 @@ class QuoteClient:
             self._ctx = self._quote_ctx = None
             self._last_err_at = time.time()
             print(f"  [Quote] Connect failed: {e}")
+            _push_data_warning("Futu 行情连接失败", str(e))
             return False
 
     def _ensure(self):
@@ -231,10 +273,11 @@ class QuoteClient:
             if self._trd_ctx is not None:
                 try:
                     self._trd_ctx.close()
-                except:
-                    pass
+                except Exception as e:
+                    print(f"  [Trade] close before reconnect failed: {e}")
 
             # 尝试导入 SecurityFirm 枚举
+            # 灏濊瘯瀵煎叆 SecurityFirm 鏋氫妇
             security_firm = None
             try:
                 from moomoo import SecurityFirm
@@ -272,6 +315,7 @@ class QuoteClient:
             self._trd_ctx = None
             self._trd_last_err_at = time.time()
             print(f"  [Trade] Connect failed: {e}")
+            _push_data_warning("Futu 交易连接失败", str(e))
             return False
 
     def _ensure_trade(self):
@@ -289,22 +333,45 @@ class QuoteClient:
             if self._ctx is not None:
                 try:
                     self._ctx.close()
-                except:
-                    pass
+                except Exception as e:
+                    print(f"  [Quote] close failed: {e}")
                 self._ctx = self._quote_ctx = None
                 print("  [Quote] Closed")
         with self._trd_lock:
             if self._trd_ctx is not None:
                 try:
                     self._trd_ctx.close()
-                except:
-                    pass
+                except Exception as e:
+                    print(f"  [Trade] close failed: {e}")
                 self._trd_ctx = None
                 print("  [Trade] Closed")
 
     # ══════════════════════════════════════════════════════════════
     #  行情查询
     # ══════════════════════════════════════════════════════════════
+
+    def _get_cached_snapshot(self, ticker: str, max_age_sec: int) -> dict | None:
+        cached = self._snapshot_cache.get(ticker)
+        if not cached:
+            return None
+        age = time.time() - cached.get("ts", 0)
+        if age > max_age_sec:
+            return None
+        quote = dict(cached["quote"])
+        quote["cache_age_sec"] = int(age)
+        quote["from_cache"] = True
+        return quote
+
+    def _snapshot_allowed(self) -> bool:
+        now = time.time()
+        self._snapshot_call_times = [
+            ts for ts in self._snapshot_call_times
+            if now - ts < SNAPSHOT_WINDOW_SEC
+        ]
+        if len(self._snapshot_call_times) >= SNAPSHOT_WINDOW_LIMIT:
+            return False
+        self._snapshot_call_times.append(now)
+        return True
 
     def fetch_one(self, ticker: str, timeout: float = 3.0) -> dict | None:
         """
@@ -319,12 +386,31 @@ class QuoteClient:
             session_used     # 实际取到价的时段 (fallback 后)
             rth_close        # RTH 收盘价,夜盘时用于对比
         """
+        cached = self._get_cached_snapshot(ticker, SNAPSHOT_CACHE_TTL_SEC)
+        if cached:
+            return cached
         if not self._ensure():
+            return None
+        if not self._snapshot_allowed():
+            cached = self._get_cached_snapshot(ticker, SNAPSHOT_STALE_TTL_SEC)
+            if cached:
+                print(f"  [Quote] snapshot quota guard: use cached {ticker}")
+                return cached
+            _push_data_warning(
+                f"行情快照限流 {ticker}",
+                f"本地已达到 {SNAPSHOT_WINDOW_SEC}s/{SNAPSHOT_WINDOW_LIMIT} 次保护阈值",
+                cooldown_sec=300,
+            )
             return None
         try:
             with self._lock:
                 ret, snap = self._ctx.get_market_snapshot([ticker])
             if ret != RET_OK or snap is None or len(snap) == 0:
+                cached = self._get_cached_snapshot(ticker, SNAPSHOT_STALE_TTL_SEC)
+                if cached:
+                    print(f"  [Quote] snapshot failed, use cached {ticker}: {snap}")
+                    return cached
+                _push_data_warning(f"行情快照失败 {ticker}", str(snap))
                 return None
 
             row   = snap.iloc[0]
@@ -336,16 +422,26 @@ class QuoteClient:
             session = _detect_session()
             price, session_used = _pick_price(row, session)
             if price is None:
+                _push_data_warning(f"行情价格为空 {ticker}", f"session={session}, row={row.to_dict()}")
                 return None
 
+            # v0.5.7: update_time 可能带毫秒 ("2026-05-14 09:30:00.488")，
+            #         先试带 .%f 的格式，再退回不带毫秒的，都失败才告警。
+            # | update_time may carry milliseconds; try with-microseconds first.
             age_sec = -1
-            try:
-                dt_q    = datetime.strptime(update_time, "%Y-%m-%d %H:%M:%S")
+            dt_q = None
+            for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    dt_q = datetime.strptime(update_time, fmt)
+                    break
+                except ValueError:
+                    continue
+            if dt_q is not None:
                 age_sec = max(0, int((_et_now() - dt_q).total_seconds()))
-            except:
-                pass
+            else:
+                print(f"  [Quote] update_time parse failed for {ticker}: {update_time!r}")
 
-            return {
+            quote = {
                 "ticker":       ticker,
                 "price":        round(price, 4),
                 "prev_close":   round(prev, 4),
@@ -359,8 +455,15 @@ class QuoteClient:
                 "session_used": session_used,
                 "rth_close":    round(rth_close, 4),
             }
+            self._snapshot_cache[ticker] = {"ts": time.time(), "quote": dict(quote)}
+            return quote
         except Exception as e:
             print(f"  [Quote] fetch_one({ticker}) error: {e}")
+            cached = self._get_cached_snapshot(ticker, SNAPSHOT_STALE_TTL_SEC)
+            if cached:
+                print(f"  [Quote] fetch_one error, use cached {ticker}")
+                return cached
+            _push_data_warning(f"行情获取异常 {ticker}", str(e))
             with self._lock:
                 self._ctx = self._quote_ctx = None
                 self._last_err_at = time.time()
@@ -371,14 +474,13 @@ class QuoteClient:
         result = {tk: None for tk in tickers}
         if not tickers or not self._ensure():
             return result
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futs = {pool.submit(self.fetch_one, tk): tk for tk in tickers}
-            for fut in as_completed(futs, timeout=10):
-                tk = futs[fut]
-                try:
-                    result[tk] = fut.result()
-                except Exception as e:
-                    print(f"  [Quote] batch error on {tk}: {e}")
+        # Futu free quota is tight; avoid bursty parallel snapshot calls.
+        # 免费版 snapshot 配额很紧，批量请求按顺序走缓存/限流，避免瞬间打爆。
+        for tk in tickers:
+            try:
+                result[tk] = self.fetch_one(tk)
+            except Exception as e:
+                print(f"  [Quote] batch error on {tk}: {e}")
         return result
 
     # ══════════════════════════════════════════════════════════════
@@ -420,6 +522,7 @@ class QuoteClient:
                     refresh_cache=True,
                 )
             if ret != RET_OK or data is None or len(data) == 0:
+                _push_data_warning("账户资金查询失败", str(data))
                 return None
 
             row = data.iloc[0]
@@ -492,6 +595,7 @@ class QuoteClient:
                     currency=Currency.USD,
                 )
             if ret2 != RET_OK or data2 is None or len(data2) == 0:
+                _push_data_warning("账户 USD fallback 查询失败", str(data2))
                 return None
             row2 = data2.iloc[0]
 
@@ -531,6 +635,7 @@ class QuoteClient:
             }
         except Exception as e:
             print(f"  [Trade] fetch_account error: {e}")
+            _push_data_warning("账户资金获取异常", str(e))
             with self._trd_lock:
                 self._trd_ctx = None
                 self._trd_last_err_at = time.time()
@@ -573,6 +678,7 @@ class QuoteClient:
                     refresh_cache=True,
                 )
             if ret != RET_OK or data is None:
+                _push_data_warning("持仓查询失败", str(data))
                 return None
 
             positions = {}
@@ -658,6 +764,7 @@ class QuoteClient:
 
         except Exception as e:
             print(f"  [Trade] fetch_positions error: {e}")
+            _push_data_warning("持仓获取异常", str(e))
             with self._trd_lock:
                 self._trd_ctx = None
                 self._trd_last_err_at = time.time()
@@ -675,9 +782,11 @@ class QuoteClient:
             with self._trd_lock:
                 ret, data = self._trd_ctx.deal_list_query(trd_env=TrdEnv.REAL)
             if ret != RET_OK or data is None or len(data) == 0:
+                if ret != RET_OK:
+                    _push_data_warning("当日成交查询失败", str(data))
                 return {}
 
-            earliest = {}
+            latest = {}
             for _, row in data.iterrows():
                 code = str(row.get("code", "") or "")
                 if not code:
@@ -697,10 +806,10 @@ class QuoteClient:
                     epoch = dt.timestamp()
                 except Exception:
                     continue
-                prev = earliest.get(code)
-                if prev is None or epoch < prev:
-                    earliest[code] = epoch
-            return earliest
+                prev = latest.get(code)
+                if prev is None or epoch > prev:
+                    latest[code] = epoch
+            return latest
         except Exception as e:
             print(f"  [Trade] fetch_today_deals error: {e}")
             return None
