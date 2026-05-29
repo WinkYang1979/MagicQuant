@@ -1,7 +1,7 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — swing_detector.py
-  VERSION : v0.5.36
+  VERSION : v0.5.37
   DATE    : 2026-05-15
   CHANGES :
     v0.5.31 (2026-05-15):
@@ -367,6 +367,9 @@ DEFAULT_PARAMS = {
     "shadow_rebound_rsi_max": 68,
     "shadow_rebound_vol_ratio": 0.30,
     "shadow_rebound_move5_pct": 0.45,
+    "shadow_tg_enabled": False,
+    "shadow_tg_vol_ratio": 0.80,
+    "shadow_tg_cooldown": 1800,
 
     "swing_cooldown_weak":   900,
     "swing_cooldown_strong": 600,
@@ -708,6 +711,61 @@ def _persist_shadow_signal(session, record: dict) -> None:
         pass
 
 
+def _record_wave_forward_case(session, record: dict, indicators=None) -> None:
+    """Record forward outcome case; scoring is done by later replay. / 记录前向结局样本，后续复盘再打分。"""
+    try:
+        if not record:
+            return
+        current = record.get("current")
+        ticker = record.get("ticker")
+        direction = record.get("direction")
+        ts = record.get("ts")
+        case = {
+            "case_id": f"{ts}|{ticker}|{direction}|{record.get('reason')}",
+            "ts": ts,
+            "date": record.get("date"),
+            "trigger": "shadow_wave_forward_case",
+            "source_trigger": record.get("trigger"),
+            "ticker": ticker,
+            "direction": direction,
+            "entry_price": current,
+            "entry_ts": ts,
+            "status": "open",
+            "horizon_bars": [3, 6, 12],
+            "day_change_pct": record.get("day_change_pct"),
+            "vwap": record.get("vwap"),
+            "rsi": record.get("rsi"),
+            "vol_ratio": record.get("vol_ratio"),
+            "move5_pct": record.get("move5_pct"),
+            "move15_pct": record.get("move15_pct"),
+            "session_high": (indicators or {}).get("session_high"),
+            "session_low": (indicators or {}).get("session_low"),
+        }
+        in_memory = getattr(session, "_wave_forward_cases", None)
+        if in_memory is None:
+            in_memory = []
+            session._wave_forward_cases = in_memory
+        in_memory.append(case)
+        if len(in_memory) > 300:
+            del in_memory[:-300]
+        if getattr(session, "_disable_review_log", False):
+            return
+        out_dir = Path(__file__).resolve().parents[2] / "data" / "review" / str(case["date"])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_file = out_dir / "wave_forward_cases.json"
+        records = []
+        if out_file.exists():
+            try:
+                records = json.loads(out_file.read_text(encoding="utf-8"))
+            except Exception:
+                records = []
+        if not any(item.get("case_id") == case["case_id"] for item in records[-1000:]):
+            records.append(case)
+            out_file.write_text(json.dumps(records[-1000:], ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"  [swing] ⚠️ wave_forward_case 记录失败: {e}")
+
+
 def _last_prices_increasing(session, ticker: str, count: int = 3) -> bool:
     """Check recent sampled prices are rising. / 检查最近采样价是否连续抬高。"""
     try:
@@ -812,7 +870,74 @@ def check_targeted_breakdown_shadow(session, ticker, indicators, params=None):
     if len(in_memory) > 200:
         del in_memory[:-200]
     _persist_shadow_signal(session, record)
+    _record_wave_forward_case(session, record, indicators)
     return record
+
+
+def _shadow_record_to_wave_alert(session, record, indicators, params=None):
+    """Promote selected shadow records to low-frequency watch alerts. / 将精选影子信号升格为低频看盘提醒。"""
+    params = params or DEFAULT_PARAMS
+    if not params.get("shadow_tg_enabled", False):
+        return None
+    if not record:
+        return None
+
+    vol_ratio = float(record.get("vol_ratio") or 0)
+    move5 = float(record.get("move5_pct") or 0)
+    direction = record.get("direction")
+    same_direction_momentum = (
+        (direction == "long" and move5 >= params.get("shadow_rebound_move5_pct", 0.45))
+        or (direction == "short" and move5 <= params.get("shadow_breakdown_move5_pct", -0.20))
+    )
+    if vol_ratio < params.get("shadow_tg_vol_ratio", 0.80) or not same_direction_momentum:
+        return None
+
+    ticker = record.get("ticker")
+    trigger = "wave_trough_rebound" if direction == "long" else "wave_peak_rollover"
+    cool_key = f"shadow_tg:{ticker}:{direction}"
+    if not session.can_trigger(cool_key, cooldown_sec=params.get("shadow_tg_cooldown", 1800)):
+        return None
+    session.mark_triggered(cool_key)
+
+    current = record.get("current")
+    vwap = record.get("vwap")
+    if direction == "long":
+        key_price = vwap or current
+        title = f"🔄 {ticker.replace('US.','')} 波谷反弹时刻"
+        confirm = f"站稳 ${key_price:.2f} 价格关键位" if key_price else "站稳关键价"
+        fail = "跌回日低附近"
+    else:
+        high = indicators.get("session_high") if indicators else None
+        key_price = vwap or current
+        title = f"🔻 {ticker.replace('US.','')} 波峰回落时刻"
+        confirm = f"跌破 ${key_price:.2f} 价格关键位" if key_price else "跌破关键价"
+        fail = f"重新站回 ${high:.2f} 附近" if high else "重新站回前高附近"
+
+    return {
+        "trigger": trigger,
+        "level": "INFO",
+        "style": "C",
+        "ticker": ticker,
+        "direction": direction,
+        "strength": "WEAK",
+        "data": {
+            "current": current,
+            "day_change_pct": record.get("day_change_pct"),
+            "vwap": vwap,
+            "rsi": record.get("rsi"),
+            "vol_ratio": vol_ratio,
+            "move5_pct": move5,
+            "move15_pct": record.get("move15_pct"),
+            "high_drawdown_pct": record.get("high_drawdown_pct"),
+            "low_rebound_pct": record.get("low_rebound_pct"),
+            "confirm_text": confirm,
+            "fail_text": fail,
+            "shadow_profile": record.get("profile"),
+            "shadow_reason": record.get("reason"),
+            "has_indicators": True,
+        },
+        "title": title,
+    }
 
 
 def _log_rebound_delay(session, ticker: str, source: str, outcome: str, detail: dict,
@@ -2584,9 +2709,14 @@ def _get_day_change(session, ticker):
 def diagnose_distance(session, ticker, indicators, params=None):
     params = params or DEFAULT_PARAMS
     day_chg = _get_day_change(session, ticker)
+    ticker_short = ticker.replace("US.", "")
 
     has_ind = bool(indicators and indicators.get("data_ok"))
     rsi = indicators.get("rsi_5m", 50) if has_ind else None
+    current = session.get_last_price(ticker) if hasattr(session, "get_last_price") else None
+    vwap = indicators.get("vwap") if has_ind else None
+    session_high = indicators.get("session_high") if has_ind else None
+    session_low = indicators.get("session_low") if has_ind else None
     choppy = _is_choppy(session, ticker,
                         window_pts=params["choppy_window_pts"],
                         ratio=params["choppy_ratio"])
@@ -2599,15 +2729,29 @@ def diagnose_distance(session, ticker, indicators, params=None):
         if day_chg > 0:
             gap = params["trend_day_change_pct"] - day_chg
             if gap <= 0:
-                distances.append(f"较昨收涨幅触发（{day_chg:+.2f}%），等待: 站稳/跌破关键位后再看")
+                key_price = vwap or session_high or current
+                wait_line = (
+                    f"等待: 站稳 ${key_price:.2f} 价格关键位后再看"
+                    if key_price else "等待: 站稳关键位后再看"
+                )
+                distances.append(f"{ticker_short} 较昨收涨幅触发（{day_chg:+.2f}%）\n  {wait_line}")
             elif gap <= 0.3:
-                distances.append(f"较昨收涨幅接近，还差 {gap:.2f}%（当前 {day_chg:+.2f}%）")
+                distances.append(f"{ticker_short} 较昨收涨幅接近，还差 {gap:.2f}%（当前 {day_chg:+.2f}%）")
         else:
             gap = params["trend_day_change_pct"] - abs(day_chg)
             if gap <= 0:
-                distances.append(f"较昨收跌幅触发（{day_chg:+.2f}%），等待: 站稳/跌破关键位后再看")
+                if current and vwap and current >= vwap:
+                    key_price = session_low or current
+                    wait_line = f"等待: 跌破 ${key_price:.2f} 价格关键位后再看"
+                else:
+                    key_price = vwap or current
+                    wait_line = (
+                        f"等待: 站稳 ${key_price:.2f} 价格关键位后再看"
+                        if key_price else "等待: 站稳关键位后再看"
+                    )
+                distances.append(f"{ticker_short} 较昨收跌幅触发（{day_chg:+.2f}%）\n  {wait_line}")
             elif gap <= 0.3:
-                distances.append(f"较昨收跌幅接近，还差 {gap:.2f}%（当前 {day_chg:+.2f}%）")
+                distances.append(f"{ticker_short} 较昨收跌幅接近，还差 {gap:.2f}%（当前 {day_chg:+.2f}%）")
 
     if rsi is not None:
         gap_top = params["rsi_overbought_weak"] - rsi
@@ -2740,7 +2884,10 @@ def run_all_triggers(session, master_ticker, followers, indicators, params=None)
             return [attach_quality(hits[0], quality)]
         return []
 
-    check_targeted_breakdown_shadow(session, master_ticker, indicators, params)
+    shadow_record = check_targeted_breakdown_shadow(session, master_ticker, indicators, params)
+    shadow_alert = _shadow_record_to_wave_alert(session, shadow_record, indicators, params)
+    if shadow_alert:
+        hits.append(shadow_alert)
 
     trend_hit = check_direction_trend(session, master_ticker, indicators, params)
     if trend_hit:

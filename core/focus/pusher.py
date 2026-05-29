@@ -1,7 +1,7 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — pusher.py
-  VERSION : v0.5.36
+  VERSION : v0.5.37
   DATE    : 2026-05-13
   CHANGES :
     v0.5.30 (2026-05-13):
@@ -138,8 +138,8 @@ except ImportError:
     _kd_spec.loader.exec_module(_kd_mod)
     inject_kline_source_line = _kd_mod.inject_kline_source_line
 
-VERSION = "v0.5.36"
-SWING_VERSION = "v0.5.36"
+VERSION = "v0.5.37"
+SWING_VERSION = "v0.5.37"
 
 _DAILY_ATR_CACHE = {}
 
@@ -1532,6 +1532,8 @@ def format_trigger_message(hit, session=None):
         result = _fmt_panic_rebound(hit, session)
     elif trigger == "crash_rebound_watch":
         result = _fmt_crash_rebound_watch(hit, session)
+    elif trigger in ("wave_trough_rebound", "wave_peak_rollover"):
+        result = _fmt_wave_moment(hit, session)
     elif trigger == "rapid_move":
         result = _fmt_rapid_move(hit, session)
     elif trigger == "near_resistance":
@@ -2816,8 +2818,7 @@ def _fmt_breakdown_warning(hit, session=None):
         "信号: 破位风险已确认",
         "执行参考: 不再按看多处理；若反弹不上 VWAP，空头仍占优",
     ]
-    manual = _manual_cmd_line({"trigger": "breakdown_warning", "ticker": hit["ticker"], "direction": "short"}, session)
-    text = _wrap_message("\n".join(lines), session, hit["ticker"], manual)
+    text = "\n".join(lines)
     return {"text": text, "buttons": [[{"text": "🧠 AI", "callback_data": f"focus_ai_{m}"}]], "style": "B"}
 
 
@@ -2835,7 +2836,7 @@ def _fmt_capitulation_bottom_watch(hit, session=None):
         "观察: RSI/形态开始有止跌迹象",
         "确认: 重新站上 VWAP 或连续 5m K 线止跌，再看反弹质量",
     ]
-    text = _wrap_message("\n".join(lines), session, hit["ticker"], None)
+    text = "\n".join(lines)
     return {"text": text, "buttons": [[{"text": "馃 AI", "callback_data": f"focus_ai_{m}"}]], "style": "C"}
 
 
@@ -2856,8 +2857,7 @@ def _fmt_panic_rebound(hit, session=None):
         "确认: 继续放量并收回 VWAP，反弹质量才算提高",
         "失效: 跌回日低附近，说明只是弱反抽",
     ]
-    manual = _manual_cmd_line({"trigger": "panic_rebound", "ticker": hit["ticker"], "direction": "long"}, session)
-    text = _wrap_message("\n".join(lines), session, hit["ticker"], manual)
+    text = "\n".join(lines)
     return {"text": text, "buttons": [[{"text": "🧠 AI", "callback_data": f"focus_ai_{m}"}]], "style": "B"}
 
 
@@ -2877,9 +2877,37 @@ def _fmt_crash_rebound_watch(hit, session=None):
         "确认: 继续站稳 VWAP / 放量上穿前高",
         "失效: 跌回日低附近，反弹失败",
     ]
-    manual = _manual_cmd_line({"trigger": "crash_rebound_watch", "ticker": hit["ticker"], "direction": "long"}, session)
-    text = _wrap_message("\n".join(lines), session, hit["ticker"], manual)
+    text = "\n".join(lines)
     return {"text": text, "buttons": [[{"text": "🧠 AI", "callback_data": f"focus_ai_{m}"}]], "style": "C"}
+
+
+def _fmt_wave_moment(hit, session=None):
+    d = hit["data"]
+    m = hit["ticker"].replace("US.", "")
+    is_rebound = hit.get("trigger") == "wave_trough_rebound"
+    title = "波谷反弹时刻" if is_rebound else "波峰回落时刻"
+    bias = "偏看多" if is_rebound else "偏看空"
+    conclusion = (
+        "空头动能开始松动，但还不是趋势反转确认"
+        if is_rebound else
+        "反弹动能开始转弱，短线先偏防守"
+    )
+    action = "不追买，等确认" if is_rebound else "不追空，等确认"
+    lines = [
+        f"{'🔄' if is_rebound else '🔻'} <b>{m} {title}</b>",
+        "━━━━━━━━━━━━━━",
+        f"结论: {conclusion}",
+        f"属性: 看盘提醒 · {bias} · 无下单按钮",
+        f"现价 {_money(d.get('current'))}  较昨收 {_num(d.get('day_change_pct'), '+.2f')}%",
+        f"5m动量 {_num(d.get('move5_pct'), '+.2f')}%  ·  15m动量 {_num(d.get('move15_pct'), '+.2f')}%",
+        f"RSI {_num(d.get('rsi'), '.1f')}  ·  VWAP {_money(d.get('vwap'))}  ·  量比 {_num(d.get('vol_ratio'), '.2f')}x",
+        "",
+        f"等待: {d.get('confirm_text')}",
+        f"失效: {d.get('fail_text')}",
+        f"操作: {action}",
+    ]
+    text = "\n".join(lines)
+    return {"text": text, "buttons": [], "style": "C"}
 
 
 def _fmt_rapid_move(hit, session=None):

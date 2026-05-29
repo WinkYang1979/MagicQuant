@@ -566,12 +566,12 @@ def _build_heartbeat(session: FocusSession, indicators: dict) -> str:
     diag = {} if data_untrusted else diagnose_distance(session, session.master, indicators)
     if data_untrusted:
         lines.append("")
-        lines.append("🔍 观察项: 已隐藏（数据不可信）")
+        lines.append("🔍 观察要点：已隐藏（数据不可信）")
     elif diag.get("ready"):
         ds = diag.get("distances") or []
         if ds:
             lines.append("")
-            lines.append("🔍 观察项:")
+            lines.append("🔍 观察要点：")
             for d in ds[:3]:
                 lines.append(f"  · {d}")
 
@@ -602,9 +602,13 @@ def _build_heartbeat(session: FocusSession, indicators: dict) -> str:
     manual_tag = "⚡手动" if getattr(session, "manual_mode", False) else ""
     runtime_min = int((time.time() - (session.first_data_ts or time.time())) / 60)
     lines.append("")
-    lines.append(f"运行 {runtime_min}分 · 循环 {session.loop_count} · "
-                 f"推送 {session.push_count} · 错误 {session.error_count} {manual_tag}")
-    lines.append(f"\n⚙️ focus {FOCUS_MGR_VERSION}")
+    status_line = (
+        f"运行 {runtime_min}分 · 循环 {session.loop_count} · "
+        f"推送 {session.push_count} · 错误 {session.error_count}"
+    )
+    if manual_tag:
+        status_line = f"{status_line} · {manual_tag}"
+    lines.append(f"{status_line} · ⚙️ focus {FOCUS_MGR_VERSION}")
     return "\n".join(lines)
 
 
