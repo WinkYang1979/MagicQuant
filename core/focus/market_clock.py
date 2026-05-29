@@ -69,6 +69,12 @@ def _prev_day_is_trading(d: datetime) -> bool:
     return _is_trading_day(prev)
 
 
+def _next_day_is_trading(d: datetime) -> bool:
+    """Next RTH trading day check for holiday/Sunday overnight sessions."""
+    nxt = d + timedelta(days=1)
+    return _is_trading_day(nxt)
+
+
 def get_market_status(now=None) -> str:
     """
     返回美股当前市场状态:
@@ -89,14 +95,14 @@ def get_market_status(now=None) -> str:
 
     # 1) 凌晨 00:00-03:50:属于"上一交易日"的夜盘
     if t < OVERNIGHT_END:
-        return "overnight" if _prev_day_is_trading(now) else "closed"
+        return "overnight" if _is_trading_day(now) else "closed"
 
     # 2) 03:50-04:00:夜盘刚结算完,盘前未开,归 closed 空档
     if OVERNIGHT_END <= t < PRE_MARKET_OPEN:
         return "closed"
 
     # 3) 04:00 之后所有时段都要求"今天是交易日"
-    if not _is_trading_day(now):
+    if t < POST_MARKET_CLOSE and not _is_trading_day(now):
         return "closed"
 
     if PRE_MARKET_OPEN <= t < REGULAR_OPEN:
@@ -106,7 +112,7 @@ def get_market_status(now=None) -> str:
     if REGULAR_CLOSE <= t < POST_MARKET_CLOSE:
         return "post"
     # 20:00 之后到 00:00:夜盘(前提:今天是交易日,上面已排除节假日)
-    return "overnight"
+    return "overnight" if _next_day_is_trading(now) else "closed"
 
 
 def is_market_open(strict=False) -> bool:

@@ -169,6 +169,9 @@ def calc_all_micro(kl_5m: pd.DataFrame, current_price: float) -> dict:
 
     n_today = len(kl_today)
     vwap_ok = n_today >= 3
+    last_bar_time = None
+    if "time_key" in kl_5m.columns and len(kl_5m) > 0:
+        last_bar_time = str(kl_5m["time_key"].iloc[-1])
 
     if vwap_ok:
         vwap         = calc_vwap(kl_today)
@@ -200,6 +203,7 @@ def calc_all_micro(kl_5m: pd.DataFrame, current_price: float) -> dict:
         "data_ok":      True,
         "vwap_ok":      vwap_ok,               # v0.5.27: VWAP 是否就绪
         "is_today":     is_today,              # v0.5.25: 当日子集是否非空
+        "last_bar_time": last_bar_time,
     }
 
 

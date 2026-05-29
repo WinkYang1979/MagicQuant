@@ -1,7 +1,7 @@
 """
 ════════════════════════════════════════════════════════════════════
   MagicQuant Focus — swing_detector.py
-  VERSION : v0.5.31
+  VERSION : v0.5.36
   DATE    : 2026-05-15
   CHANGES :
     v0.5.31 (2026-05-15):
@@ -194,10 +194,49 @@
 ════════════════════════════════════════════════════════════════════
 """
 
+import json
+import sys
 import time
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from config.settings import MIN_ADD_BUDGET_USD, MIN_BUDGET_USD
+try:
+    from .position_followup import MANAGED_EXIT_TRIGGERS, check_position_followup
+except ImportError:
+    import importlib.util
+    import sys
+    _pf_path = Path(__file__).resolve().parent / "position_followup.py"
+    _pf_spec = importlib.util.spec_from_file_location("mq_focus_position_followup", _pf_path)
+    _pf_mod = importlib.util.module_from_spec(_pf_spec)
+    sys.modules["mq_focus_position_followup"] = _pf_mod
+    _pf_spec.loader.exec_module(_pf_mod)
+    MANAGED_EXIT_TRIGGERS = _pf_mod.MANAGED_EXIT_TRIGGERS
+    check_position_followup = _pf_mod.check_position_followup
+try:
+    from .data_quality import (
+        attach_quality,
+        evaluate_data_quality,
+        log_blocked_signal,
+        trigger_allows_bad_data,
+        trigger_requires_fresh_data,
+    )
+except ImportError:
+    import importlib.util
+    import sys
+    from pathlib import Path
+    _dq_path = Path(__file__).resolve().parent / "data_quality.py"
+    _dq_spec = importlib.util.spec_from_file_location("mq_focus_data_quality", _dq_path)
+    _dq_mod = importlib.util.module_from_spec(_dq_spec)
+    sys.modules["mq_focus_data_quality"] = _dq_mod
+    _dq_spec.loader.exec_module(_dq_mod)
+    attach_quality = _dq_mod.attach_quality
+    evaluate_data_quality = _dq_mod.evaluate_data_quality
+    log_blocked_signal = _dq_mod.log_blocked_signal
+    trigger_allows_bad_data = _dq_mod.trigger_allows_bad_data
+    trigger_requires_fresh_data = _dq_mod.trigger_requires_fresh_data
 
 
 DEFAULT_PARAMS = {
@@ -228,7 +267,16 @@ DEFAULT_PARAMS = {
     "trend_hold_drawdown_pct":      3.0,
     "trend_hold_vol_dry":           0.5,
     "trend_lock_required_hits":     3,
-    "target_advance_trend_cooldown": 1200,
+    "target_advance_trend_cooldown": 2400,
+    "indicator_stale_repeat":       30,     # v0.5.35: 2s poll 下跨多根 K 线再判冻结
+    "weak_day_change_pct":         -2.5,    # v0.5.34: 弱势行情日内跌幅阈值
+    "weak_rsi_threshold":           35,
+    "weak_rsi_bars":                5,
+    "weak_vwap_bars":               3,
+    "swing_bottom_weak_confirm_required": 2,
+    "near_support_break_pct":       0.5,
+    "near_support_vol_spike_mult":  2.0,
+    "near_support_dist_change_pct": 1.0,
     # 档位 (盈利百分比边界)
     "profit_tier1_max_pct":         3.0,    # <3%   → 1/3 仓
     "profit_tier2_max_pct":         8.0,    # 3-8%  → 1/2 仓
@@ -259,12 +307,66 @@ DEFAULT_PARAMS = {
     # v0.5.5: STRONG 门槛提高
     "trend_day_change_pct":  0.8,
     "trend_day_change_strong": 2.0,  # ← 新增:STRONG 需要 >=2%
+    "post_top_warning_cap_sec": 300, # 顶部风险后 5min 内 long STRONG 降级 / cap long STRONG after top-risk warning
     "trend_rsi_long":        52,
     "trend_rsi_short":       48,
     "trend_rsi_overbought_guard": 75,   # long 方向但 RSI > 75 → 超买不追多
     "trend_rsi_oversold_guard":   38,   # short 方向但 RSI < 38 → 超卖不追空 (v0.5.17: 40→38)
     "trend_vol_ratio_short_guard": 0.8, # v0.5.18: short 方向量比必须 >= 0.8,无量回调不推空
     "trend_cooldown_sec":    1200,
+    "intraday_reversal_pct": 5.0,       # 日内高/低点反转幅度 / intraday high-low reversal
+    "intraday_reversal_rsi_mid": 50,
+    "intraday_reversal_rsi_low": 35,
+    "intraday_reversal_rsi_high": 65,
+    "intraday_reversal_vol_min": 0.8,
+    "intraday_reversal_short_rsi_high": 55,
+    "intraday_reversal_short_room_pct": 0.0,
+    "intraday_reversal_long_room_pct": 2.0,
+    "intraday_reversal_cooldown": 1200,
+    "breakdown_day_change_pct": -2.5,
+    "breakdown_move_pct": 1.0,
+    "breakdown_vol_ratio": 2.0,
+    "breakdown_early_day_change_pct": -2.0,
+    "breakdown_early_move_pct": 0.45,
+    "breakdown_early_vol_ratio": 1.0,
+    "breakdown_early_rsi_max": 45,
+    "breakdown_early_high_drawdown_pct": 2.0,
+    "breakdown_struct_day_change_pct": -5.0,
+    "breakdown_struct_rsi_max": 30,
+    "breakdown_struct_vol_ratio": 0.8,
+    "breakdown_struct_high_drawdown_pct": 5.0,
+    "breakdown_cooldown": 900,
+    "bottom_watch_day_change_pct": -8.0,
+    "bottom_watch_rsi_max": 25,
+    "bottom_watch_dist_low_pct": 1.5,
+    "bottom_watch_cooldown": 900,
+    "panic_rebound_day_change_pct": -5.0,
+    "panic_rebound_rsi_max": 30,
+    "panic_rebound_min_rebound_pct": 0.6,
+    "panic_rebound_move_pct": 0.6,
+    "panic_rebound_vol_ratio": 0.8,
+    "panic_rebound_cooldown": 900,
+    "crash_rebound_day_change_pct": -4.0,
+    "crash_rebound_min_rebound_pct": 1.2,
+    "crash_rebound_move_pct": 0.30,
+    "crash_rebound_rsi_min": 35,
+    "crash_rebound_rsi_max": 65,
+    "crash_rebound_vol_ratio": 0.35,
+    "crash_rebound_cooldown": 600,
+    "shadow_targeted_enabled": True,
+    "shadow_targeted_cooldown": 1200,
+    "shadow_breakdown_day_change_pct": -1.0,
+    "shadow_breakdown_high_drawdown_pct": 0.8,
+    "shadow_breakdown_rsi_max": 55,
+    "shadow_breakdown_vol_ratio": 0.25,
+    "shadow_breakdown_move5_pct": -0.20,
+    "shadow_breakdown_move15_pct": -0.60,
+    "shadow_rebound_day_change_pct": -3.0,
+    "shadow_rebound_low_rebound_pct": 1.0,
+    "shadow_rebound_rsi_min": 35,
+    "shadow_rebound_rsi_max": 68,
+    "shadow_rebound_vol_ratio": 0.30,
+    "shadow_rebound_move5_pct": 0.45,
 
     "swing_cooldown_weak":   900,
     "swing_cooldown_strong": 600,
@@ -290,6 +392,7 @@ DEFAULT_PARAMS = {
     "near_resist_warn_pct":  3.0,    # 距阻力位 <3% → 卖出预警
     "near_support_warn_pct": 3.0,    # 距支撑位 <3% → 买入预警
     "near_warn_cooldown":    600,    # 接近预警冷却 10 分钟
+    "near_support_cooldown": 1800,   # v0.5.34: near_support 冷却 30 分钟
 
     # v0.5.21: 超买放量预警
     "overbought_surge_rsi":  80,     # RSI 超买阈值
@@ -313,6 +416,451 @@ def _global_mutex_ok(session, mutex_sec: int = 60) -> bool:
 
 def _mark_global_triggered(session):
     session.last_any_trigger_ts = time.time()
+
+
+def _price_move_pct_since(session, ticker: str, seconds: int) -> Optional[float]:
+    """Net price move over a recent window. / 计算最近窗口净涨跌幅。"""
+    try:
+        prices_ts = getattr(session, "prices", {}).get(ticker, []) or []
+        if len(prices_ts) < 2:
+            return None
+        now_ts = time.time()
+        recent = []
+        for ts, price in prices_ts:
+            try:
+                raw_ts = ts.timestamp() if hasattr(ts, "timestamp") else float(ts)
+                if now_ts - raw_ts <= seconds:
+                    recent.append(float(price))
+            except Exception:
+                continue
+        if len(recent) < 2:
+            recent = [float(p) for _, p in prices_ts[-2:]]
+        start, end = recent[0], recent[-1]
+        if start <= 0:
+            return None
+        return (end - start) / start * 100.0
+    except Exception:
+        return None
+
+
+def _slope_sign(value: Optional[float], flat_band: float = 0.05) -> str:
+    """Convert slope/move to up/down/flat. / 把斜率转换为方向标签。"""
+    if value is None:
+        return "unknown"
+    if value > flat_band:
+        return "up"
+    if value < -flat_band:
+        return "down"
+    return "flat"
+
+
+def _rsi_slope(indicators) -> Optional[float]:
+    try:
+        hist = (indicators or {}).get("rsi_history") or []
+        if len(hist) < 2:
+            return None
+        recent = [float(v) for v in hist[-3:]]
+        return recent[-1] - recent[0]
+    except Exception:
+        return None
+
+
+def _market_session_label() -> str:
+    try:
+        from .market_clock import get_market_status
+    except Exception:
+        try:
+            from core.focus.market_clock import get_market_status
+        except Exception:
+            get_market_status = None
+    try:
+        return get_market_status() if get_market_status else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _direction_skip_regime(session, ticker: str, direction: str, indicators, params) -> dict:
+    """Snapshot the market state when a direction signal is blocked. / 记录方向被挡时的市场状态。"""
+    params = params or DEFAULT_PARAMS
+    current = session.get_last_price(ticker) if hasattr(session, "get_last_price") else None
+    vwap = (indicators or {}).get("vwap")
+    price_vs_vwap = None
+    try:
+        if current and vwap:
+            price_vs_vwap = (float(current) - float(vwap)) / float(vwap) * 100.0
+    except Exception:
+        price_vs_vwap = None
+
+    move15 = _price_move_pct_since(session, ticker, 15 * 60)
+    move30 = _price_move_pct_since(session, ticker, 30 * 60)
+    rsi = (indicators or {}).get("rsi_5m")
+    rsi_delta = _rsi_slope(indicators)
+    choppy = _is_choppy(
+        session,
+        ticker,
+        window_pts=params.get("choppy_window_pts", 10),
+        ratio=params.get("choppy_ratio", 3.0),
+    )
+    day_chg = _get_day_change(session, ticker)
+    skip_class = "right_skip"
+    if direction == "short" and move15 is not None and price_vs_vwap is not None:
+        if move15 <= -params.get("direction_skip_wrong_move15_pct", 1.2) and not choppy and price_vs_vwap < 0:
+            skip_class = "wrong_skip"
+    elif direction == "long" and move15 is not None and price_vs_vwap is not None:
+        if move15 >= params.get("direction_skip_wrong_move15_pct", 1.2) and not choppy and price_vs_vwap > 0:
+            skip_class = "wrong_skip"
+
+    return {
+        "day_chg": round(day_chg, 4) if isinstance(day_chg, (int, float)) else day_chg,
+        "current": round(float(current), 4) if current is not None else None,
+        "vwap": round(float(vwap), 4) if vwap is not None else None,
+        "price_vs_vwap_pct": round(price_vs_vwap, 4) if price_vs_vwap is not None else None,
+        "move15_pct": round(move15, 4) if move15 is not None else None,
+        "move30_pct": round(move30, 4) if move30 is not None else None,
+        "slope_sign": _slope_sign(move15),
+        "choppy": bool(choppy),
+        "rsi": round(float(rsi), 4) if rsi is not None else None,
+        "rsi_slope": round(rsi_delta, 4) if rsi_delta is not None else None,
+        "rsi_slope_sign": _slope_sign(rsi_delta, flat_band=0.2),
+        "vol_ratio": (indicators or {}).get("vol_ratio"),
+        "market_session": _market_session_label(),
+        "skip_class": skip_class,
+    }
+
+
+def _persist_direction_skip(session, record: dict) -> None:
+    """Best-effort local review log. / best-effort 落盘,失败不影响主循环。"""
+    try:
+        if getattr(session, "_disable_review_log", False):
+            return
+        out_dir = Path(__file__).resolve().parents[2] / "data" / "review" / record["date"]
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_file = out_dir / "direction_skips.json"
+        records = []
+        if out_file.exists():
+            try:
+                records = json.loads(out_file.read_text(encoding="utf-8"))
+            except Exception:
+                records = []
+        records.append(record)
+        out_file.write_text(json.dumps(records[-1000:], ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _apply_extreme_rsi_skip_override(record: dict, reason: str) -> None:
+    """Extreme RSI guards are usually valid protections. / 极端 RSI 拦截通常是保护。"""
+    try:
+        rsi = record.get("rsi")
+        if reason == "rsi_oversold_guard" and rsi is not None and float(rsi) < 30:
+            record["skip_class"] = "right_skip"
+            record["skip_note"] = "extreme_oversold_guard"
+        elif reason == "rsi_overbought_guard" and rsi is not None and float(rsi) > 70:
+            record["skip_class"] = "right_skip"
+            record["skip_note"] = "extreme_overbought_guard"
+    except Exception:
+        pass
+
+
+def _log_direction_skip(session, ticker: str, direction: str, reason: str, detail: str = "",
+                        indicators=None, params=None, cooldown_sec: int = 60):
+    """Throttle direction skip diagnostics. / 方向信号未触发原因诊断,带冷却避免刷屏。"""
+    try:
+        params = params or DEFAULT_PARAMS
+        day_chg = _get_day_change(session, ticker)
+        threshold = params.get("trend_day_change_pct", DEFAULT_PARAMS["trend_day_change_pct"])
+        if direction not in ("long", "short") or day_chg is None or abs(day_chg) < threshold:
+            return
+        now = time.time()
+        key = f"{ticker}:{direction}:{reason}"
+        last = getattr(session, "_direction_skip_log_ts", {}) or {}
+        if now - last.get(key, 0) < cooldown_sec:
+            return
+        last[key] = now
+        session._direction_skip_log_ts = last
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        regime = _direction_skip_regime(session, ticker, direction, indicators, params)
+        also_emitted = getattr(session, "_direction_skip_last_emitted", None) or "none"
+        record = {
+            "ts": now_et.strftime("%Y-%m-%d %H:%M:%S"),
+            "date": now_et.strftime("%Y-%m-%d"),
+            "trigger": "direction_skip",
+            "ticker": ticker,
+            "intended_direction": direction,
+            "blocked_by": reason,
+            "blocked_value": detail,
+            "also_emitted": also_emitted,
+            **regime,
+        }
+        _apply_extreme_rsi_skip_override(record, reason)
+        in_memory = getattr(session, "_direction_skips", None)
+        if in_memory is None:
+            in_memory = []
+            session._direction_skips = in_memory
+        in_memory.append(record)
+        if len(in_memory) > 200:
+            del in_memory[:-200]
+        _persist_direction_skip(session, record)
+        suffix = f" ({detail})" if detail else ""
+        print(
+            f"  [direction_skip] {ticker} {direction} {record['skip_class']} "
+            f"blocked: {reason}{suffix}; move15={regime['move15_pct']} "
+            f"pvwap={regime['price_vs_vwap_pct']} choppy={regime['choppy']}"
+        )
+    except Exception:
+        pass
+
+
+def _mark_top_warning(session, ticker: str, trigger: str) -> None:
+    """Remember top-risk warnings for near-term confidence caps. / 记录顶部风险，用于短期降级强多信号。"""
+    try:
+        state = getattr(session, "_last_top_warning_ts", None)
+        if state is None:
+            state = {}
+            session._last_top_warning_ts = state
+        state[ticker] = {"ts": time.time(), "trigger": trigger}
+    except Exception:
+        pass
+
+
+def _recent_top_warning(session, ticker: str, window_sec: int) -> dict | None:
+    """Return recent top-risk warning info if still active. / 返回仍在有效期内的顶部风险记录。"""
+    try:
+        state = getattr(session, "_last_top_warning_ts", {}) or {}
+        info = state.get(ticker) or {}
+        ts = float(info.get("ts") or 0)
+        elapsed = time.time() - ts
+        if ts > 0 and elapsed < window_sec:
+            return {"elapsed": elapsed, "trigger": info.get("trigger")}
+    except Exception:
+        pass
+    return None
+
+
+def _trend_rsi_rolling_over(session, direction: str) -> bool:
+    """检测 RSI 是否在转向(冲上来 vs 滚下来)。v0.5.36 hotfix:
+    long 要求 rsi_slope < -2 且 rsi[-1] >= 50(原 55 太紧,11:02 RSI54.5 漏);
+    short 镜像。基于 session._last_kline_cache 的 closes 计算最近 3 个 RSI 点的斜率。
+    """
+    try:
+        kl = getattr(session, "_last_kline_cache", None)
+        if kl is None or not hasattr(kl, "columns") or "close" not in kl.columns:
+            return False
+        from .micro_indicators import calc_rsi_fast
+        closes = kl["close"].astype(float)
+        if len(closes) < 18:
+            return False
+        rsis = []
+        for off in range(2, -1, -1):
+            end = len(closes) - off
+            if end >= 15:
+                rsis.append(float(calc_rsi_fast(closes.iloc[:end], 14)))
+        if len(rsis) < 3:
+            return False
+        slope = rsis[-1] - rsis[0]
+        r = rsis[-1]
+        if direction == "long":
+            return slope < -2 and r >= 50
+        if direction == "short":
+            return slope > 2 and r <= 50
+    except Exception:
+        pass
+    return False
+
+
+def _persist_rebound_delay(session, record: dict) -> None:
+    """Best-effort rebound delay diagnostics. / 暴跌反弹延迟诊断落盘。"""
+    try:
+        if getattr(session, "_disable_review_log", False):
+            return
+        out_dir = Path(__file__).resolve().parents[2] / "data" / "review" / record["date"]
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_file = out_dir / "rebound_delay.json"
+        records = []
+        if out_file.exists():
+            try:
+                records = json.loads(out_file.read_text(encoding="utf-8"))
+            except Exception:
+                records = []
+        records.append(record)
+        out_file.write_text(json.dumps(records[-1000:], ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _persist_shadow_signal(session, record: dict) -> None:
+    """Best-effort shadow signal log. / 影子信号落盘,失败不影响主循环。"""
+    try:
+        if getattr(session, "_disable_review_log", False):
+            return
+        out_dir = Path(__file__).resolve().parents[2] / "data" / "review" / record["date"]
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_file = out_dir / "shadow_signals.json"
+        records = []
+        if out_file.exists():
+            try:
+                records = json.loads(out_file.read_text(encoding="utf-8"))
+            except Exception:
+                records = []
+        records.append(record)
+        out_file.write_text(json.dumps(records[-1000:], ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _last_prices_increasing(session, ticker: str, count: int = 3) -> bool:
+    """Check recent sampled prices are rising. / 检查最近采样价是否连续抬高。"""
+    try:
+        prices_ts = getattr(session, "prices", {}).get(ticker, []) or []
+        recent = [float(price) for _, price in prices_ts[-count:]]
+        return len(recent) >= count and all(recent[i] > recent[i - 1] for i in range(1, len(recent)))
+    except Exception:
+        return False
+
+
+def check_targeted_breakdown_shadow(session, ticker, indicators, params=None):
+    """
+    Research-only D_TARGETED_BREAKDOWN shadow signal.
+    研究用影子信号: 只记录,不推 Telegram,不进入正式 hits。
+    """
+    params = params or DEFAULT_PARAMS
+    if not params.get("shadow_targeted_enabled", True):
+        return None
+    if not indicators or not indicators.get("data_ok") or not indicators.get("is_today", True):
+        return None
+    if indicators.get("indicator_stale"):
+        return None
+
+    current = session.get_last_price(ticker) or 0
+    vwap = indicators.get("vwap") or 0
+    rsi = indicators.get("rsi_5m", 50) or 50
+    vol_ratio = indicators.get("vol_ratio", 1) or 1
+    high = indicators.get("session_high") or 0
+    low = indicators.get("session_low") or 0
+    day_chg = _get_day_change(session, ticker)
+    move5 = session.get_price_change_pct(ticker, 5 * 60)
+    move15 = session.get_price_change_pct(ticker, 15 * 60)
+    if not current or day_chg is None or move5 is None:
+        return None
+
+    high_drawdown = (high - current) / high * 100 if high else 0.0
+    low_rebound = (current - low) / low * 100 if low else 0.0
+    move15_ok = move15 if move15 is not None else move5
+
+    breakdown_vwap_ok = (not vwap) or current < vwap or move15_ok <= params.get("shadow_breakdown_move15_pct", -0.60)
+    breakdown = (
+        day_chg <= params.get("shadow_breakdown_day_change_pct", -1.0)
+        and breakdown_vwap_ok
+        and high_drawdown >= params.get("shadow_breakdown_high_drawdown_pct", 0.8)
+        and rsi <= params.get("shadow_breakdown_rsi_max", 55)
+        and vol_ratio >= params.get("shadow_breakdown_vol_ratio", 0.25)
+        and (
+            move5 <= params.get("shadow_breakdown_move5_pct", -0.20)
+            or move15_ok <= params.get("shadow_breakdown_move15_pct", -0.60)
+        )
+    )
+    rebound = (
+        day_chg <= params.get("shadow_rebound_day_change_pct", -3.0)
+        and low_rebound >= params.get("shadow_rebound_low_rebound_pct", 1.0)
+        and params.get("shadow_rebound_rsi_min", 35) <= rsi <= params.get("shadow_rebound_rsi_max", 68)
+        and vol_ratio >= params.get("shadow_rebound_vol_ratio", 0.30)
+        and (
+            move5 >= params.get("shadow_rebound_move5_pct", 0.45)
+            or _last_prices_increasing(session, ticker, 3)
+        )
+    )
+    if not (breakdown or rebound):
+        return None
+
+    direction = "short" if breakdown else "long"
+    trigger = "shadow_targeted_breakdown" if breakdown else "shadow_targeted_rebound"
+    now = time.time()
+    cooldown_sec = params.get("shadow_targeted_cooldown", 1200)
+    state = getattr(session, "_shadow_signal_ts", {}) or {}
+    key = f"D_TARGETED_BREAKDOWN:{ticker}:{trigger}:{direction}"
+    if now - state.get(key, 0) < cooldown_sec:
+        return None
+    state[key] = now
+    session._shadow_signal_ts = state
+
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    record = {
+        "ts": now_et.strftime("%Y-%m-%d %H:%M:%S"),
+        "date": now_et.strftime("%Y-%m-%d"),
+        "trigger": trigger,
+        "profile": "D_TARGETED_BREAKDOWN",
+        "shadow_only": True,
+        "ticker": ticker,
+        "direction": direction,
+        "strength": "WEAK",
+        "current": round(float(current), 4),
+        "day_change_pct": round(float(day_chg), 4),
+        "vwap": round(float(vwap), 4) if vwap else None,
+        "rsi": round(float(rsi), 4),
+        "vol_ratio": round(float(vol_ratio), 4),
+        "high_drawdown_pct": round(float(high_drawdown), 4),
+        "low_rebound_pct": round(float(low_rebound), 4),
+        "move5_pct": round(float(move5), 4),
+        "move15_pct": round(float(move15_ok), 4) if move15_ok is not None else None,
+        "reason": "breakdown" if breakdown else "rebound",
+    }
+    in_memory = getattr(session, "_shadow_signals", None)
+    if in_memory is None:
+        in_memory = []
+        session._shadow_signals = in_memory
+    in_memory.append(record)
+    if len(in_memory) > 200:
+        del in_memory[:-200]
+    _persist_shadow_signal(session, record)
+    return record
+
+
+def _log_rebound_delay(session, ticker: str, source: str, outcome: str, detail: dict,
+                       indicators=None, params=None, cooldown_sec: int = 60) -> None:
+    """Record why crash rebound did/didn't surface. / 记录暴跌反弹信号为何浮现或未浮现。"""
+    try:
+        params = params or DEFAULT_PARAMS
+        day_chg = detail.get("day_change_pct")
+        low_rebound = detail.get("low_rebound_pct")
+        if day_chg is None or low_rebound is None:
+            return
+        # Only diagnose real crash/rebound context. / 只诊断真实暴跌后反弹语境。
+        if day_chg > params.get("crash_rebound_day_change_pct", -5.0) or low_rebound < 0.5:
+            return
+
+        now = time.time()
+        key = f"{ticker}:{source}:{outcome}:{detail.get('primary_reason')}"
+        last = getattr(session, "_rebound_delay_log_ts", {}) or {}
+        if now - last.get(key, 0) < cooldown_sec:
+            return
+        last[key] = now
+        session._rebound_delay_log_ts = last
+
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        record = {
+            "ts": now_et.strftime("%Y-%m-%d %H:%M:%S"),
+            "date": now_et.strftime("%Y-%m-%d"),
+            "trigger": "rebound_delay",
+            "ticker": ticker,
+            "source": source,
+            "outcome": outcome,
+            **detail,
+        }
+        in_memory = getattr(session, "_rebound_delay_events", None)
+        if in_memory is None:
+            in_memory = []
+            session._rebound_delay_events = in_memory
+        in_memory.append(record)
+        if len(in_memory) > 200:
+            del in_memory[:-200]
+        _persist_rebound_delay(session, record)
+        print(
+            f"  [rebound_delay] {ticker} {source} {outcome}: "
+            f"{detail.get('primary_reason')} day={day_chg:.2f}% "
+            f"rebound={low_rebound:.2f}% rsi={detail.get('rsi')}"
+        )
+    except Exception:
+        pass
 
 
 def _minutes_since_rth_open():
@@ -472,6 +1020,159 @@ def _is_strong_market(session, ticker, indicators, params=None) -> bool:
         and params.get("trend_hold_rsi_min", 50) <= rsi <= params.get("trend_hold_rsi_max", 70)
         and vol_ratio > params.get("trend_hold_vol_min", 0.8)
     )
+
+
+def _update_indicator_stale(session, indicators, params=None) -> bool:
+    """v0.5.34: 轻量冻结检测 / lightweight vol_ratio stale guard."""
+    params = params or DEFAULT_PARAMS
+    if not indicators or not indicators.get("data_ok"):
+        return False
+    if indicators.get("_stale_checked"):
+        return bool(indicators.get("indicator_stale"))
+    vol_ratio = indicators.get("vol_ratio")
+    rsi = indicators.get("rsi_5m")
+    if vol_ratio is None:
+        return False
+    pair = (rsi, vol_ratio) if rsi is not None else vol_ratio
+
+    bar_key = (
+        indicators.get("last_bar_time")
+        or indicators.get("kline_last_time")
+        or indicators.get("last_time_key")
+    )
+    if not bar_key:
+        try:
+            kl = getattr(session, "_last_kline_cache", None)
+            if kl is not None and len(kl) > 0 and "time_key" in kl.columns:
+                bar_key = str(kl["time_key"].iloc[-1])
+        except Exception:
+            bar_key = None
+
+    state = getattr(session, "_indicator_stale_state", None) or {
+        "last_pair": None, "last_bar_key": None, "repeat": 0, "stale": False,
+    }
+    if bar_key and state.get("last_bar_key") == bar_key:
+        # 同一根 5m K 线内 RSI/量比重复是正常现象，不累计冻结次数。
+        # Same 5m bar naturally repeats RSI/volume ratio; do not count it as stale.
+        session._indicator_stale_state = state
+        indicators["indicator_stale"] = bool(state.get("stale"))
+        indicators["_stale_checked"] = True
+        return bool(state.get("stale"))
+
+    if state.get("last_pair") == pair:
+        state["repeat"] += 1
+    else:
+        if state.get("stale"):
+            print("  [swing] indicator stale recovered: vol_ratio changed")
+        state = {"last_pair": pair, "last_bar_key": bar_key, "repeat": 1, "stale": False}
+    state["last_bar_key"] = bar_key
+
+    threshold = params.get("indicator_stale_repeat", 3)
+    if state["repeat"] >= threshold:
+        if not state.get("stale"):
+            print(f"  [swing] indicator_stale=True: rsi/vol={pair} repeated {state['repeat']}x")
+        state["stale"] = True
+
+    session._indicator_stale_state = state
+    indicators["indicator_stale"] = bool(state.get("stale"))
+    indicators["_stale_checked"] = True
+    return bool(state.get("stale"))
+
+
+def _recent_bars_from_session_or_indicators(session, indicators):
+    """读取最近 K 线 / read recent kline bars when available."""
+    bars = None
+    if indicators:
+        bars = indicators.get("kline_bars")
+        if bars is None:
+            bars = indicators.get("bars")
+    if bars is not None:
+        if hasattr(bars, "empty"):
+            try:
+                return None if bars.empty else bars.to_dict("records")
+            except Exception:
+                return None
+        if len(bars) > 0:
+            return bars
+    kl = getattr(session, "_last_kline_cache", None)
+    if kl is not None:
+        try:
+            return kl.to_dict("records")
+        except Exception:
+            return None
+    return None
+
+
+def _last_n_closes_below_vwap(session, indicators, n=3) -> bool:
+    vwap = (indicators or {}).get("vwap")
+    if not vwap:
+        return False
+    bars = _recent_bars_from_session_or_indicators(session, indicators)
+    if bars is None or len(bars) < n:
+        return False
+    try:
+        recent = bars[-n:]
+        return all(float(b.get("close", 0) or 0) < float(vwap) for b in recent)
+    except Exception:
+        return False
+
+
+def _rsi_below_for_bars(indicators, threshold=35, bars=5) -> bool:
+    hist = (indicators or {}).get("rsi_history") or []
+    if len(hist) < bars:
+        return False
+    try:
+        return all(float(v) < threshold for v in hist[-bars:])
+    except Exception:
+        return False
+
+
+def _is_weak_market(session, ticker, indicators, params=None) -> bool:
+    """弱势行情检测 / weak market regime detector."""
+    params = params or DEFAULT_PARAMS
+    if not indicators or not indicators.get("data_ok") or not indicators.get("is_today", True):
+        return False
+
+    day_chg = _get_day_change(session, ticker)
+    if day_chg is not None and day_chg < params.get("weak_day_change_pct", -2.5):
+        return True
+
+    if _rsi_below_for_bars(
+        indicators,
+        threshold=params.get("weak_rsi_threshold", 35),
+        bars=params.get("weak_rsi_bars", 5),
+    ):
+        return True
+
+    if _last_n_closes_below_vwap(
+        session,
+        indicators,
+        n=params.get("weak_vwap_bars", 3),
+    ):
+        return True
+
+    return False
+
+
+def _strong_bottom_confirmations(session, ticker, indicators, params=None) -> tuple[int, dict]:
+    """弱势里 STRONG 底部需要反转确认 / require reversal confirmations."""
+    params = params or DEFAULT_PARAMS
+    dist_low = (indicators or {}).get("dist_low", 99) or 99
+    support_valid = dist_low <= params.get("near_low_pct_strong", 0.8)
+    rsi_hist = (indicators or {}).get("rsi_history") or []
+    rsi_rebound = len(rsi_hist) >= 2 and (rsi_hist[-1] > rsi_hist[-2])
+    current = session.get_last_price(ticker) or (indicators or {}).get("current") or 0
+    vwap = (indicators or {}).get("vwap") or 0
+    above_vwap = bool(current and vwap and current >= vwap)
+    vol_ratio = (indicators or {}).get("vol_ratio", 1) or 1
+    volume_confirm = vol_ratio >= 1.2
+    checks = {
+        "support_valid": support_valid,
+        "rsi_rebound": rsi_rebound,
+        "above_vwap": above_vwap,
+        "volume_confirm": volume_confirm,
+    }
+    return sum(1 for ok in checks.values() if ok), checks
 
 
 def check_profit_target(session, ticker, indicators=None, params=None):
@@ -657,6 +1358,9 @@ def check_drawdown_from_peak(session, ticker, params=None):
     peak = session.peak_price.get(ticker) if hasattr(session, "peak_price") else None
     if cost <= 0 or peak is None or peak <= cost:
         return None
+    peak_gain_pct = (peak - cost) / cost * 100.0
+    if peak_gain_pct < params.get("drawdown_min_peak_gain_pct", 2.0):
+        return None
 
     drawdown = session.get_peak_drawdown_pct(ticker)
     if drawdown is None:
@@ -688,7 +1392,7 @@ def check_drawdown_from_peak(session, ticker, params=None):
 #  | dedicated risk alert for losing positions; replaces the old
 #  | profit_target.drawdown branch which mis-fires when pl_val < 0
 # ══════════════════════════════════════════════════════════════════
-def check_stop_loss_warning(session, ticker, params=None):
+def check_stop_loss_warning(session, ticker, params=None, bad_data_mode: bool = False):
     """
     亏损持仓两档告警:
       WARN   浮亏 >= stop_loss_loss_pct (2%)   → 接近止损,建议减仓 1/3
@@ -710,12 +1414,13 @@ def check_stop_loss_warning(session, ticker, params=None):
         return None
 
     loss_pct = abs(pl_pct)  # pl_pct < 0,这里取绝对值方便比较
-    if loss_pct < params["stop_loss_loss_pct"]:
+    loss_floor = 3.0 if bad_data_mode else params["stop_loss_loss_pct"]
+    if loss_pct < loss_floor:
         return None
 
-    target_state = (getattr(session, "_target_state", {}) or {}).get(ticker) or {}
-    stop = target_state.get("stop") or round(cost * 0.97, 2)
-    breached = loss_pct >= params["stop_loss_breach_pct"] or (stop > 0 and current < stop)
+    target_state = {} if bad_data_mode else ((getattr(session, "_target_state", {}) or {}).get(ticker) or {})
+    stop = None if bad_data_mode else (target_state.get("stop") or round(cost * 0.97, 2))
+    breached = loss_pct >= (5.0 if bad_data_mode else params["stop_loss_breach_pct"])
     level    = "URGENT" if breached else "WARN"
     cd       = params["stop_loss_cooldown_breach"] if breached else params["stop_loss_cooldown_warn"]
     sub_kind = "breached" if breached else "approaching"
@@ -727,7 +1432,14 @@ def check_stop_loss_warning(session, ticker, params=None):
 
     # ── 止损位:优先 _target_state,否则 cost × 0.97 兜底
     # ── 减仓档位:亏损越深减得越多;breached 起步半仓
-    if loss_pct >= 8.0:
+    if bad_data_mode:
+        if loss_pct >= 8.0:
+            sell_ratio, tier_text = 1.0, "立刻人工决策"
+        elif loss_pct >= 5.0:
+            sell_ratio, tier_text = 0.75, "强风险提醒"
+        else:
+            sell_ratio, tier_text = 1/3, "纯浮亏风险提示"
+    elif loss_pct >= 8.0:
         sell_ratio, tier_text = 1.0, "强烈建议立即清仓"
     elif loss_pct >= 5.0:
         sell_ratio, tier_text = 0.75, "减仓 3/4,留小仓观察"
@@ -765,6 +1477,7 @@ def check_stop_loss_warning(session, ticker, params=None):
             "pl_pct":      pl_pct,
             "stop":        stop,
             "sub_kind":    sub_kind,        # approaching / breached
+            "bad_data_mode": bool(bad_data_mode),
             "loss_pct":    round(loss_pct, 2),
             "sell_qty":    sell_qty,
             "sell_ratio":  sell_ratio,
@@ -840,6 +1553,9 @@ def check_swing_bottom(session, ticker, indicators, params=None):
     params = params or DEFAULT_PARAMS
     if not indicators.get("data_ok"):
         return None
+    if indicators.get("indicator_stale") or _update_indicator_stale(session, indicators, params):
+        print(f"  [swing] swing_bottom silenced: indicator_stale {ticker}")
+        return None
     # v0.5.25: 非当日 K 线(盘前/夜盘 RTH 缺失 fallback) 不触发
     if not indicators.get("is_today", True):
         return None
@@ -866,6 +1582,27 @@ def check_swing_bottom(session, ticker, indicators, params=None):
         strength, level, cd = "WEAK", "WARN", params["swing_cooldown_weak"]
     else:
         return None
+
+    if strength == "WEAK":
+        now = time.time()
+        last_log = getattr(session, "_swing_bottom_weak_log_ts", {}) or {}
+        if now - last_log.get(ticker, 0) >= 60:
+            print(f"  [swing] swing_bottom WEAK recorded only: {ticker}")
+            last_log[ticker] = now
+            session._swing_bottom_weak_log_ts = last_log
+        return None
+
+    weak_market = _is_weak_market(session, ticker, indicators, params)
+    confirm_checks = None
+    if weak_market:
+        confirm_count, confirm_checks = _strong_bottom_confirmations(session, ticker, indicators, params)
+        required = params.get("swing_bottom_weak_confirm_required", 2)
+        if confirm_count < required:
+            print(
+                f"  [swing] swing_bottom STRONG silenced: confirmations "
+                f"{confirm_count}/{required} {ticker}"
+            )
+            return None
 
     cool_key = f"swing_bottom_{ticker}_{strength}"
     if not session.can_trigger(cool_key, cooldown_sec=cd):
@@ -897,6 +1634,8 @@ def check_swing_bottom(session, ticker, indicators, params=None):
             "current": session.get_last_price(ticker),
             "day_change_pct": _get_day_change(session, ticker),
             "cond_rsi": cond_rsi_weak, "cond_candle": cond_candle, "cond_near": cond_near_low_w,
+            "weak_market": weak_market,
+            "weak_confirmations": confirm_checks,
         },
         "title": f"🟢 {ticker.replace('US.','')} 波段底信号 [{strength}]",
     }
@@ -926,19 +1665,34 @@ def check_direction_trend(session, ticker, indicators, params=None):
     # 判断方向
     if day_chg >= params["trend_day_change_pct"]:
         if has_indicators and rsi < params["trend_rsi_long"]:
+            _log_direction_skip(session, ticker, "long", "rsi_too_low_for_long",
+                                f"rsi={rsi:.1f} < {params['trend_rsi_long']}",
+                                indicators, params)
             return None
         # 超买区不追多(RSI 过高说明已经拉过头,容易回踩)
         if has_indicators and rsi > params["trend_rsi_overbought_guard"]:
+            _log_direction_skip(session, ticker, "long", "rsi_overbought_guard",
+                                f"rsi={rsi:.1f} > {params['trend_rsi_overbought_guard']}",
+                                indicators, params)
             return None
         direction, emoji, word = "long", "🚀", "看多"
     elif day_chg <= -params["trend_day_change_pct"]:
         if has_indicators and rsi > params["trend_rsi_short"]:
+            _log_direction_skip(session, ticker, "short", "rsi_too_high_for_short",
+                                f"rsi={rsi:.1f} > {params['trend_rsi_short']}",
+                                indicators, params)
             return None
         # 超卖区不追空(RSI 过低说明已经砸过头,容易反弹)
         if has_indicators and rsi < params["trend_rsi_oversold_guard"]:
+            _log_direction_skip(session, ticker, "short", "rsi_oversold_guard",
+                                f"rsi={rsi:.1f} < {params['trend_rsi_oversold_guard']}",
+                                indicators, params)
             return None
         # v0.5.18: 量比不足 0.8 = 无量回调,不视为真空头
         if vol_ratio is not None and vol_ratio < params.get("trend_vol_ratio_short_guard", 0.8):
+            _log_direction_skip(session, ticker, "short", "vol_too_low_short",
+                                f"vol_ratio={vol_ratio:.2f} < {params.get('trend_vol_ratio_short_guard', 0.8)}",
+                                indicators, params)
             return None
         # v0.5.21: 多空转换确认 — 价格必须从近20点高点回落 ≥ flip_short_confirm_pct
         confirm_pct = params.get("flip_short_confirm_pct", 2.0)
@@ -950,6 +1704,10 @@ def check_direction_trend(session, ticker, indicators, params=None):
             if recent_high > 0:
                 drop_pct = (recent_high - current_p) / recent_high * 100
                 if drop_pct < confirm_pct:
+                    _log_direction_skip(session, ticker, "short", "flip_short_not_confirmed",
+                                        f"drop={drop_pct:.2f}% < {confirm_pct:.2f}%",
+                                        indicators, params)
+                if drop_pct < confirm_pct:
                     return None  # 未确认充分回落,不转空
         direction, emoji, word = "short", "📉", "看空"
     else:
@@ -959,6 +1717,9 @@ def check_direction_trend(session, ticker, indicators, params=None):
     if _is_choppy(session, ticker,
                   window_pts=params["choppy_window_pts"],
                   ratio=params["choppy_ratio"]):
+        _log_direction_skip(session, ticker, direction, "choppy",
+                            f"window={params['choppy_window_pts']} ratio>{params['choppy_ratio']}",
+                            indicators, params)
         return None  # 震荡市静默
 
     # v0.5.5: has_indicators=False 时的额外限制
@@ -968,6 +1729,9 @@ def check_direction_trend(session, ticker, indicators, params=None):
         recent_dir = _recent_price_direction(session, ticker, window_pts=5)
         expected_dir = "up" if direction == "long" else "down"
         if recent_dir != expected_dir:
+            _log_direction_skip(session, ticker, direction, "no_indicator_dir_mismatch",
+                                f"recent={recent_dir} expected={expected_dir}",
+                                indicators, params)
             return None  # 近期价格方向不一致,不推
 
     # v0.5.5: STRONG 门槛提高
@@ -978,8 +1742,28 @@ def check_direction_trend(session, ticker, indicators, params=None):
     else:
         strength = "STRONG" if abs(day_chg) >= strong_threshold else "WEAK"
 
+    cap_reasons = []
+    top_warning = None
+    if strength == "STRONG" and direction in ("long", "short"):
+        top_warning = _recent_top_warning(
+            session, ticker, int(params.get("post_top_warning_cap_sec", 300))
+        )
+        if top_warning and direction == "long":
+            # Do not silence the signal; downgrade "strong" after a fresh top-risk warning.
+            # 不静默方向，只在刚提示顶部风险后把强多降级，避免 10:43 -> 10:44 矛盾。
+            strength = "WEAK"
+            cap_reasons.append("post_top_warning_cap")
+        # v0.5.36 hotfix: RSI 在反向滚动(long 由高滚下 / short 由低翻起)→ STRONG 降级。
+        # 治 11:02 那种 RSI54.5 滚自 66 的"信心反而升"病根。
+        if strength == "STRONG" and _trend_rsi_rolling_over(session, direction):
+            strength = "WEAK"
+            cap_reasons.append("rsi_rolling_over")
+
     cool_key = f"trend_{direction}_{ticker}"
     if not session.can_trigger(cool_key, cooldown_sec=params["trend_cooldown_sec"]):
+        _log_direction_skip(session, ticker, direction, "cooldown",
+                            f"{params['trend_cooldown_sec']}s",
+                            indicators, params)
         return None
     session.mark_triggered(cool_key)
 
@@ -996,12 +1780,446 @@ def check_direction_trend(session, ticker, indicators, params=None):
             "session_high": indicators.get("session_high") if has_indicators else None,
             "session_low":  indicators.get("session_low")  if has_indicators else None,
             "has_indicators": has_indicators,
+            "rsi_history": indicators.get("rsi_history") if has_indicators else None,
+            "confidence_cap": 65 if top_warning else None,
+            "cap_reasons": cap_reasons,
+            "top_warning_trigger": top_warning.get("trigger") if top_warning else None,
+            "top_warning_elapsed_sec": round(top_warning.get("elapsed"), 1) if top_warning else None,
             "choppy_filtered": False,  # 到这里说明通过了震荡过滤
         },
         "title": f"{emoji} {ticker.replace('US.','')} 方向信号({word} {day_chg:+.2f}%)",
     }
     _record_strong_trend(session, ticker, direction, strength, params)
     return hit
+
+
+def check_intraday_reversal(session, ticker, indicators, params=None):
+    """盘中反转方向 / Intraday reversal direction signal."""
+    params = params or DEFAULT_PARAMS
+    if not indicators or not indicators.get("data_ok") or not indicators.get("is_today", True):
+        return None
+    if indicators.get("indicator_stale") or _update_indicator_stale(session, indicators, params):
+        return None
+
+    current = session.get_last_price(ticker) or 0
+    high = indicators.get("session_high") or 0
+    low = indicators.get("session_low") or 0
+    vwap = indicators.get("vwap") or 0
+    rsi = indicators.get("rsi_5m", 50) or 50
+    vol_ratio = indicators.get("vol_ratio", 1) or 1
+    high = indicators.get("session_high") or 0
+    day_chg = _get_day_change(session, ticker)
+    if not current or not high or not low or not vwap or day_chg is None:
+        return None
+
+    rev_pct = params.get("intraday_reversal_pct", 5.0)
+    rsi_mid = params.get("intraday_reversal_rsi_mid", 50)
+    rsi_low = params.get("intraday_reversal_rsi_low", 35)
+    rsi_high = params.get("intraday_reversal_rsi_high", 65)
+    short_rsi_high = params.get("intraday_reversal_short_rsi_high", 55)
+    vol_min = params.get("intraday_reversal_vol_min", 1.2)
+    short_room_pct = params.get("intraday_reversal_short_room_pct", 1.0)
+    long_room_pct = params.get("intraday_reversal_long_room_pct", 2.0)
+
+    high_dd = (high - current) / high * 100 if high else 0
+    low_rebound = (current - low) / low * 100 if low else 0
+    long_missing = []
+    if day_chg <= -params.get("trend_day_change_pct", 0.8) and low_rebound >= 0.5:
+        if low_rebound < rev_pct:
+            long_missing.append("low_rebound_below_reversal_pct")
+        if current <= vwap:
+            long_missing.append("not_above_vwap")
+        if not (rsi_mid <= rsi <= rsi_high):
+            long_missing.append("rsi_not_in_reversal_band")
+        if high_dd < long_room_pct:
+            long_missing.append("not_enough_room_from_high")
+        if vol_ratio < vol_min:
+            long_missing.append("vol_ratio_below_min")
+    direction = None
+    word = ""
+    reversal_pct = 0.0
+    if (day_chg >= params.get("trend_day_change_pct", 0.8)
+            and high_dd >= rev_pct
+            and current < vwap
+            and rsi_low <= rsi <= short_rsi_high
+            and low_rebound >= short_room_pct
+            and vol_ratio >= vol_min):
+        direction, word, reversal_pct = "short", "盘中转弱", high_dd
+    elif (day_chg <= -params.get("trend_day_change_pct", 0.8)
+          and low_rebound >= rev_pct
+          and current > vwap
+          and rsi_mid <= rsi <= rsi_high
+          and high_dd >= long_room_pct
+          and vol_ratio >= vol_min):
+        direction, word, reversal_pct = "long", "盘中转强", low_rebound
+    else:
+        if long_missing:
+            _log_rebound_delay(session, ticker, "intraday_reversal_long", "not_produced", {
+                "primary_reason": long_missing[0],
+                "missing": long_missing,
+                "current": current,
+                "day_change_pct": day_chg,
+                "low_rebound_pct": low_rebound,
+                "high_drawdown_pct": high_dd,
+                "rsi": rsi,
+                "vol_ratio": vol_ratio,
+                "vwap": vwap,
+            }, indicators, params)
+        return None
+
+    cool_key = f"intraday_reversal_{direction}_{ticker}"
+    if not session.can_trigger(cool_key, cooldown_sec=params.get("intraday_reversal_cooldown", 1200)):
+        if direction == "long":
+            _log_rebound_delay(session, ticker, "intraday_reversal_long", "cooldown", {
+                "primary_reason": "cooldown",
+                "current": current,
+                "day_change_pct": day_chg,
+                "low_rebound_pct": low_rebound,
+                "high_drawdown_pct": high_dd,
+                "rsi": rsi,
+                "vol_ratio": vol_ratio,
+                "vwap": vwap,
+            }, indicators, params)
+        return None
+    session.mark_triggered(cool_key)
+    if direction == "long":
+        _log_rebound_delay(session, ticker, "intraday_reversal_long", "produced_strong", {
+            "primary_reason": "produced",
+            "current": current,
+            "day_change_pct": day_chg,
+            "low_rebound_pct": low_rebound,
+            "high_drawdown_pct": high_dd,
+            "rsi": rsi,
+            "vol_ratio": vol_ratio,
+            "vwap": vwap,
+        }, indicators, params)
+    return {
+        "trigger": "intraday_reversal",
+        "level": "WARN",
+        "style": "B",
+        "ticker": ticker,
+        "direction": direction,
+        "strength": "STRONG",
+        "data": {
+            "day_change_pct": day_chg,
+            "rsi": rsi,
+            "vol_ratio": vol_ratio,
+            "vwap": vwap,
+            "current": current,
+            "session_high": high,
+            "session_low": low,
+            "reversal_pct": reversal_pct,
+            "has_indicators": True,
+        },
+        "title": f"🔄 {ticker.replace('US.','')} {word} ({reversal_pct:.1f}%)",
+    }
+
+
+def check_breakdown_warning(session, ticker, indicators, params=None):
+    """Fresh-data breakdown alert: warn on real downside break without calling it an entry."""
+    params = params or DEFAULT_PARAMS
+    if not indicators or not indicators.get("data_ok") or not indicators.get("is_today", True):
+        return None
+    if indicators.get("indicator_stale") or _update_indicator_stale(session, indicators, params):
+        print(f"  [swing] breakdown_warning silenced: indicator_stale {ticker}")
+        return None
+
+    current = session.get_last_price(ticker) or 0
+    vwap = indicators.get("vwap") or 0
+    rsi = indicators.get("rsi_5m", 50) or 50
+    vol_ratio = indicators.get("vol_ratio", 1) or 1
+    high = indicators.get("session_high") or 0
+    day_chg = _get_day_change(session, ticker)
+    window_sec = params.get("rapid_move_window", 120)
+    move_pct = session.get_price_change_pct(ticker, window_sec)
+    if not current or not vwap or day_chg is None or move_pct is None:
+        return None
+
+    high_drawdown = (high - current) / high * 100 if high else 0
+    fast_breakdown = (
+        day_chg <= params.get("breakdown_day_change_pct", -2.5)
+        and current < vwap
+        and move_pct <= -params.get("breakdown_move_pct", 1.0)
+        and vol_ratio >= params.get("breakdown_vol_ratio", 2.0)
+    )
+    # Early breakdown: catch a real sell-side continuation before the old
+    # fast-breakdown gate waits for extreme volume. / 早期破位: 在高点回撤、
+    # 跌破 VWAP、短线继续下行时先提示,避免等到跌幅已经很深。
+    early_breakdown = (
+        day_chg <= params.get("breakdown_early_day_change_pct", -2.0)
+        and current < vwap
+        and move_pct <= -params.get("breakdown_early_move_pct", 0.45)
+        and vol_ratio >= params.get("breakdown_early_vol_ratio", 1.0)
+        and rsi <= params.get("breakdown_early_rsi_max", 45)
+        and high_drawdown >= params.get("breakdown_early_high_drawdown_pct", 2.0)
+    )
+    structural_breakdown = (
+        day_chg <= params.get("breakdown_struct_day_change_pct", -5.0)
+        and current < vwap
+        and rsi <= params.get("breakdown_struct_rsi_max", 30)
+        and vol_ratio >= params.get("breakdown_struct_vol_ratio", 0.8)
+        and high_drawdown >= params.get("breakdown_struct_high_drawdown_pct", 5.0)
+    )
+    if not (fast_breakdown or early_breakdown or structural_breakdown):
+        return None
+
+    cool_key = f"breakdown_warning_{ticker}"
+    if not session.can_trigger(cool_key, cooldown_sec=params.get("breakdown_cooldown", 900)):
+        return None
+    session.mark_triggered(cool_key)
+
+    return {
+        "trigger": "breakdown_warning",
+        "level": "WARN",
+        "style": "B",
+        "ticker": ticker,
+        "direction": "short",
+        "strength": "STRONG",
+        "data": {
+            "current": current,
+            "day_change_pct": day_chg,
+            "move_pct": move_pct,
+            "window_sec": window_sec,
+            "rsi": rsi,
+            "vol_ratio": vol_ratio,
+            "vwap": vwap,
+            "high_drawdown_pct": high_drawdown,
+            "breakdown_kind": "fast" if fast_breakdown else ("early" if early_breakdown else "structural"),
+            "has_indicators": True,
+        },
+        "title": f"⚠️ {ticker.replace('US.','')} 方向破位 {day_chg:+.2f}%",
+    }
+
+
+def check_capitulation_bottom_watch(session, ticker, indicators, params=None):
+    """Fresh-data capitulation watch: bottom observation without buy advice."""
+    params = params or DEFAULT_PARAMS
+    if not indicators or not indicators.get("data_ok") or not indicators.get("is_today", True):
+        return None
+    if indicators.get("indicator_stale") or _update_indicator_stale(session, indicators, params):
+        print(f"  [swing] capitulation_bottom_watch silenced: indicator_stale {ticker}")
+        return None
+
+    current = session.get_last_price(ticker) or 0
+    vwap = indicators.get("vwap") or 0
+    rsi = indicators.get("rsi_5m", 50) or 50
+    rsi_hist = indicators.get("rsi_history") or []
+    vol_ratio = indicators.get("vol_ratio", 1) or 1
+    dist_low = indicators.get("dist_low")
+    low = indicators.get("session_low") or 0
+    candle = indicators.get("candle") or {}
+    day_chg = _get_day_change(session, ticker)
+    if not current or not vwap or day_chg is None or dist_low is None:
+        return None
+
+    try:
+        rsi_rebound = len(rsi_hist) >= 2 and float(rsi_hist[-1]) > float(rsi_hist[-2])
+    except Exception:
+        rsi_rebound = False
+    bullish_candle = candle.get("type") == "bullish"
+
+    if not (
+        day_chg <= params.get("bottom_watch_day_change_pct", -8.0)
+        and rsi <= params.get("bottom_watch_rsi_max", 25)
+        and dist_low <= params.get("bottom_watch_dist_low_pct", 1.5)
+        and current < vwap
+        and (rsi_rebound or bullish_candle)
+    ):
+        return None
+
+    cool_key = f"capitulation_bottom_watch_{ticker}"
+    if not session.can_trigger(cool_key, cooldown_sec=params.get("bottom_watch_cooldown", 900)):
+        return None
+    session.mark_triggered(cool_key)
+
+    return {
+        "trigger": "capitulation_bottom_watch",
+        "level": "INFO",
+        "style": "C",
+        "ticker": ticker,
+        "direction": "neutral",
+        "strength": "WEAK",
+        "data": {
+            "current": current,
+            "day_change_pct": day_chg,
+            "rsi": rsi,
+            "rsi_rebound": rsi_rebound,
+            "candle": candle,
+            "vol_ratio": vol_ratio,
+            "vwap": vwap,
+            "session_low": low,
+            "dist_low": dist_low,
+            "has_indicators": True,
+        },
+        "title": f"🟡 {ticker.replace('US.','')} 恐慌底部观察",
+    }
+
+
+def check_panic_rebound(session, ticker, indicators, params=None):
+    """Crash-day rebound watch: extreme selloff has started bouncing."""
+    params = params or DEFAULT_PARAMS
+    if not indicators or not indicators.get("data_ok") or not indicators.get("is_today", True):
+        return None
+    if indicators.get("indicator_stale") or _update_indicator_stale(session, indicators, params):
+        print(f"  [swing] panic_rebound silenced: indicator_stale {ticker}")
+        return None
+
+    current = session.get_last_price(ticker) or 0
+    vwap = indicators.get("vwap") or 0
+    rsi = indicators.get("rsi_5m", 50) or 50
+    vol_ratio = indicators.get("vol_ratio", 1) or 1
+    low = indicators.get("session_low") or 0
+    day_chg = _get_day_change(session, ticker)
+    window_sec = params.get("rapid_move_window", 120)
+    move_pct = session.get_price_change_pct(ticker, window_sec)
+    if not current or not low or day_chg is None or move_pct is None:
+        return None
+
+    low_rebound = (current - low) / low * 100 if low else 0
+    if not (
+        day_chg <= params.get("panic_rebound_day_change_pct", -5.0)
+        and rsi <= params.get("panic_rebound_rsi_max", 30)
+        and low_rebound >= params.get("panic_rebound_min_rebound_pct", 0.6)
+        and move_pct >= params.get("panic_rebound_move_pct", 0.6)
+        and vol_ratio >= params.get("panic_rebound_vol_ratio", 0.8)
+    ):
+        return None
+
+    cool_key = f"panic_rebound_{ticker}"
+    if not session.can_trigger(cool_key, cooldown_sec=params.get("panic_rebound_cooldown", 900)):
+        return None
+    session.mark_triggered(cool_key)
+
+    strength = "STRONG" if low_rebound >= 1.2 and move_pct >= 0.8 else "WEAK"
+    return {
+        "trigger": "panic_rebound",
+        "level": "WARN" if strength == "STRONG" else "INFO",
+        "style": "B" if strength == "STRONG" else "C",
+        "ticker": ticker,
+        "direction": "long",
+        "strength": strength,
+        "data": {
+            "current": current,
+            "day_change_pct": day_chg,
+            "move_pct": move_pct,
+            "window_sec": window_sec,
+            "rsi": rsi,
+            "vol_ratio": vol_ratio,
+            "vwap": vwap,
+            "session_low": low,
+            "low_rebound_pct": low_rebound,
+            "below_vwap": bool(vwap and current < vwap),
+            "has_indicators": True,
+        },
+        "title": f"🔄 {ticker.replace('US.','')} 底部反弹 [{strength}]",
+    }
+
+
+def check_crash_rebound_watch(session, ticker, indicators, params=None):
+    """Early crash-day rebound watch; direction cue only, no sizing advice."""
+    params = params or DEFAULT_PARAMS
+    if not indicators or not indicators.get("data_ok") or not indicators.get("is_today", True):
+        return None
+    if indicators.get("indicator_stale") or _update_indicator_stale(session, indicators, params):
+        print(f"  [swing] crash_rebound_watch silenced: indicator_stale {ticker}")
+        return None
+
+    current = session.get_last_price(ticker) or 0
+    vwap = indicators.get("vwap") or 0
+    rsi = indicators.get("rsi_5m", 50) or 50
+    vol_ratio = indicators.get("vol_ratio", 1) or 1
+    low = indicators.get("session_low") or 0
+    day_chg = _get_day_change(session, ticker)
+    window_sec = params.get("rapid_move_window", 120)
+    move_pct = session.get_price_change_pct(ticker, window_sec)
+    if not current or not low or day_chg is None or move_pct is None:
+        return None
+
+    low_rebound = (current - low) / low * 100 if low else 0
+    rsi_ok = params.get("crash_rebound_rsi_min", 35) <= rsi <= params.get("crash_rebound_rsi_max", 62)
+    vwap_reclaim = bool(vwap and current >= vwap)
+    missing = []
+    if day_chg <= params.get("crash_rebound_day_change_pct", -5.0) and low_rebound >= 0.5:
+        if low_rebound < params.get("crash_rebound_min_rebound_pct", 2.0):
+            missing.append("low_rebound_below_min")
+        if move_pct < params.get("crash_rebound_move_pct", 0.35):
+            missing.append("move_pct_below_min")
+        if not rsi_ok:
+            missing.append("rsi_out_of_band")
+        if vol_ratio < params.get("crash_rebound_vol_ratio", 0.45):
+            missing.append("vol_ratio_below_min")
+    if not (
+        day_chg <= params.get("crash_rebound_day_change_pct", -5.0)
+        and low_rebound >= params.get("crash_rebound_min_rebound_pct", 2.0)
+        and move_pct >= params.get("crash_rebound_move_pct", 0.35)
+        and rsi_ok
+        and vol_ratio >= params.get("crash_rebound_vol_ratio", 0.45)
+    ):
+        if missing:
+            _log_rebound_delay(session, ticker, "crash_rebound_watch", "not_produced", {
+                "primary_reason": missing[0],
+                "missing": missing,
+                "current": current,
+                "day_change_pct": day_chg,
+                "low_rebound_pct": low_rebound,
+                "move_pct": move_pct,
+                "rsi": rsi,
+                "vol_ratio": vol_ratio,
+                "vwap": vwap,
+                "vwap_reclaim": vwap_reclaim,
+            }, indicators, params)
+        return None
+
+    cool_key = f"crash_rebound_watch_{ticker}"
+    if not session.can_trigger(cool_key, cooldown_sec=params.get("crash_rebound_cooldown", 600)):
+        _log_rebound_delay(session, ticker, "crash_rebound_watch", "cooldown", {
+            "primary_reason": "cooldown",
+            "current": current,
+            "day_change_pct": day_chg,
+            "low_rebound_pct": low_rebound,
+            "move_pct": move_pct,
+            "rsi": rsi,
+            "vol_ratio": vol_ratio,
+            "vwap": vwap,
+            "vwap_reclaim": vwap_reclaim,
+        }, indicators, params)
+        return None
+    session.mark_triggered(cool_key)
+
+    strength = "STRONG" if vwap_reclaim and low_rebound >= 3.0 and move_pct >= 0.5 else "WEAK"
+    _log_rebound_delay(session, ticker, "crash_rebound_watch", f"produced_{strength.lower()}", {
+        "primary_reason": "produced",
+        "current": current,
+        "day_change_pct": day_chg,
+        "low_rebound_pct": low_rebound,
+        "move_pct": move_pct,
+        "rsi": rsi,
+        "vol_ratio": vol_ratio,
+        "vwap": vwap,
+        "vwap_reclaim": vwap_reclaim,
+    }, indicators, params)
+    return {
+        "trigger": "crash_rebound_watch",
+        "level": "WARN" if strength == "STRONG" else "INFO",
+        "style": "B" if strength == "STRONG" else "C",
+        "ticker": ticker,
+        "direction": "long",
+        "strength": strength,
+        "data": {
+            "current": current,
+            "day_change_pct": day_chg,
+            "move_pct": move_pct,
+            "window_sec": window_sec,
+            "rsi": rsi,
+            "vol_ratio": vol_ratio,
+            "vwap": vwap,
+            "session_low": low,
+            "low_rebound_pct": low_rebound,
+            "vwap_reclaim": vwap_reclaim,
+            "has_indicators": True,
+        },
+        "title": f"🔎 {ticker.replace('US.','')} 暴跌反弹观察 [{strength}]",
+    }
 
 
 def check_rapid_move(session, ticker, indicators=None, params=None):
@@ -1028,6 +2246,9 @@ def check_rapid_move(session, ticker, indicators=None, params=None):
         # v0.5.30: 强制要求 indicators 可用 — 无指标禁止推送
         has_ind = bool(indicators and indicators.get("data_ok"))
         if not has_ind:
+            return None
+        if indicators.get("indicator_stale") or _update_indicator_stale(session, indicators, params):
+            print(f"  [swing] rapid_move silenced: indicator_stale {ticker}")
             return None
         rsi = indicators.get("rsi_5m", 50) or 50
         vol_ratio = indicators.get("vol_ratio", 1) or 1
@@ -1114,6 +2335,7 @@ def check_near_resistance(session, ticker, indicators, params=None):
         return None
     session.mark_triggered(cool_key)
     session._near_resist_last[ticker] = session_high  # 记录本次预警的阻力位
+    _mark_top_warning(session, ticker, "near_resistance")
 
     current  = session.get_last_price(ticker) or 0
     dist_pct = abs(dist_high)
@@ -1140,6 +2362,9 @@ def check_near_support(session, ticker, indicators, params=None):
     params = params or DEFAULT_PARAMS
     if not indicators.get("data_ok"):
         return None
+    if indicators.get("indicator_stale") or _update_indicator_stale(session, indicators, params):
+        print(f"  [swing] near_support silenced: indicator_stale {ticker}")
+        return None
     # v0.5.25: 非当日 K 线 不触发 (session_low/dist_low 是昨日数据)
     if not indicators.get("is_today", True):
         return None
@@ -1152,25 +2377,58 @@ def check_near_support(session, ticker, indicators, params=None):
     if not (strong_pct < dist_low <= warn_pct):
         return None
 
-    cool_key = f"near_support_{ticker}"
-    if not session.can_trigger(cool_key, cooldown_sec=params.get("near_warn_cooldown", 600)):
-        return None
-    session.mark_triggered(cool_key)
-
     session_low = indicators.get("session_low", 0)
     current     = session.get_last_price(ticker) or 0
+    vol_ratio   = indicators.get("vol_ratio", 1) or 1
+    weak_market = _is_weak_market(session, ticker, indicators, params)
+
+    cool_key = f"near_support_{ticker}"
+    cooldown_ok = session.can_trigger(cool_key, cooldown_sec=params.get("near_support_cooldown", 1800))
+    bypass_cooldown = False
+    if not cooldown_ok:
+        last = (getattr(session, "_near_support_last", {}) or {}).get(ticker) or {}
+        last_support = last.get("support") or 0
+        last_vol = last.get("vol_ratio") or 0
+        last_dist = last.get("dist_low")
+        support_break = (
+            last_support > 0 and session_low > 0
+            and abs(session_low - last_support) / last_support * 100 > params.get("near_support_break_pct", 0.5)
+        )
+        volume_spike = (
+            last_vol > 0 and vol_ratio >= last_vol * params.get("near_support_vol_spike_mult", 2.0)
+        )
+        distance_changed = (
+            last_dist is not None
+            and (last_dist - dist_low) > params.get("near_support_dist_change_pct", 1.0)
+        )
+        bypass_cooldown = support_break or volume_spike or distance_changed
+        if not bypass_cooldown:
+            return None
+
+    session.mark_triggered(cool_key)
+    if not hasattr(session, "_near_support_last"):
+        session._near_support_last = {}
+    session._near_support_last[ticker] = {
+        "support": session_low,
+        "vol_ratio": vol_ratio,
+        "dist_low": dist_low,
+    }
 
     return {
         "trigger": "near_support",
         "level": "INFO", "style": "C",
         "ticker": ticker,
-        "direction": "long",
+        "direction": "neutral" if weak_market else "long",
+        "action_intent": "support_watch" if weak_market else "buy_watch",
         "strength": "WEAK",
         "data": {
             "current": current,
             "support": session_low,
             "dist_pct": dist_low,
             "day_change_pct": _get_day_change(session, ticker),
+            "vol_ratio": vol_ratio,
+            "weak_market": weak_market,
+            "cooldown_bypass": bypass_cooldown,
         },
         "title": f"💡 {ticker.replace('US.','')} 接近支撑位 还差 {dist_low:.1f}%",
     }
@@ -1267,6 +2525,7 @@ def check_overbought_surge(session, ticker, indicators, params=None):
     if not session.can_trigger(cool_key, cooldown_sec=params.get("near_warn_cooldown", 600)):
         return None
     session.mark_triggered(cool_key)
+    _mark_top_warning(session, ticker, "overbought_surge")
 
     return {
         "trigger": "overbought_surge",
@@ -1298,6 +2557,7 @@ def check_large_day_gain(session, ticker, params=None):
     if not session.can_trigger(cool_key, cooldown_sec=1800):
         return None
     session.mark_triggered(cool_key)
+    _mark_top_warning(session, ticker, "large_day_gain")
 
     return {
         "trigger": "large_day_gain",
@@ -1333,29 +2593,29 @@ def diagnose_distance(session, ticker, indicators, params=None):
 
     distances = []
     if choppy:
-        distances.append("🌀 当前处于震荡市,方向信号被压制")
+        distances.append("🌀 当前处于震荡市，方向信号仅作观察")
 
     if day_chg is not None:
         if day_chg > 0:
             gap = params["trend_day_change_pct"] - day_chg
             if gap <= 0:
-                distances.append(f"🚀 看多已满足 (日内 {day_chg:+.2f}%)")
+                distances.append(f"较昨收涨幅触发（{day_chg:+.2f}%），等待: 站稳/跌破关键位后再看")
             elif gap <= 0.3:
-                distances.append(f"⏳ 看多差 {gap:.2f}% (日内 {day_chg:+.2f}%)")
+                distances.append(f"较昨收涨幅接近，还差 {gap:.2f}%（当前 {day_chg:+.2f}%）")
         else:
             gap = params["trend_day_change_pct"] - abs(day_chg)
             if gap <= 0:
-                distances.append(f"📉 看空已满足 (日内 {day_chg:+.2f}%)")
+                distances.append(f"较昨收跌幅触发（{day_chg:+.2f}%），等待: 站稳/跌破关键位后再看")
             elif gap <= 0.3:
-                distances.append(f"⏳ 看空差 {gap:.2f}% (日内 {day_chg:+.2f}%)")
+                distances.append(f"较昨收跌幅接近，还差 {gap:.2f}%（当前 {day_chg:+.2f}%）")
 
     if rsi is not None:
         gap_top = params["rsi_overbought_weak"] - rsi
         if 0 < gap_top <= 3:
-            distances.append(f"RSI 差 {gap_top:.1f} 到超买")
+            distances.append(f"RSI 接近超买阈值，还差 {gap_top:.1f}，注意追高风险")
         gap_bot = rsi - params["rsi_oversold_weak"]
         if 0 < gap_bot <= 3:
-            distances.append(f"RSI 差 {gap_bot:.1f} 到超卖")
+            distances.append(f"RSI 接近超卖阈值，还差 {gap_bot:.1f}，等待反弹确认")
 
     return {
         "ready": True, "rsi": rsi, "day_chg": day_chg,
@@ -1369,17 +2629,137 @@ def diagnose_distance(session, ticker, indicators, params=None):
 # ══════════════════════════════════════════════════════════════════
 #  主调度
 # ══════════════════════════════════════════════════════════════════
+def _record_blocked_signal(session, trigger, ticker, quality):
+    """Record blocked signals for local review. / 记录被数据门禁挡下的信号。"""
+    try:
+        blocked = getattr(session, "_blocked_signals", None)
+        if blocked is None:
+            blocked = []
+            session._blocked_signals = blocked
+        blocked.append({
+            "ts": time.time(),
+            "trigger": trigger,
+            "ticker": ticker,
+            "reason": quality.reason,
+            "last_bar_time": quality.last_bar_time,
+            "level": quality.level,
+        })
+        if len(blocked) > 200:
+            del blocked[:-200]
+    except Exception:
+        pass
+    try:
+        log_blocked_signal(session, {"trigger": trigger, "ticker": ticker}, quality, source="detector")
+    except Exception:
+        pass
+
+
+def _risk_only_hits(session, tickers, params):
+    """Bad indicator data: keep stop-loss only. / 坏数据只保留止损风险提醒。"""
+    hits = []
+    for tk in tickers:
+        sl = check_stop_loss_warning(session, tk, params, bad_data_mode=True)
+        if sl:
+            hits.append(sl)
+    if hits:
+        hits.sort(key=lambda h: 0 if h.get("level") == "URGENT" else 1)
+    return hits
+
+
+def _filter_hits_by_quality(session, hits, quality):
+    """Final detector-side gate. / detector 侧最终过滤。"""
+    if quality.ok:
+        return [attach_quality(h, quality) for h in hits]
+    kept = []
+    for hit in hits:
+        trigger = hit.get("trigger")
+        if trigger_allows_bad_data(trigger):
+            kept.append(attach_quality(hit, quality))
+        elif trigger_requires_fresh_data(trigger):
+            _record_blocked_signal(session, trigger, hit.get("ticker"), quality)
+            print(
+                f"  [data_quality] blocked {trigger} {hit.get('ticker')}: "
+                f"{quality.reason}"
+            )
+        else:
+            kept.append(attach_quality(hit, quality))
+    return kept
+
+
+def _held_exposure_matches_direction(master_ticker, held_tickers, direction):
+    """Held RKLB/RKLX/RKLZ exposure already matches this master direction."""
+    if direction not in ("long", "short"):
+        return False
+    classify_follower = None
+    try:
+        from .pairs import classify_follower as _classify_follower
+        classify_follower = _classify_follower
+    except Exception:
+        try:
+            from pairs import classify_follower as _classify_follower
+            classify_follower = _classify_follower
+        except Exception:
+            pass
+    for held in held_tickers or []:
+        if held == master_ticker:
+            if direction == "long":
+                return True
+            continue
+        role = classify_follower(master_ticker, held) if classify_follower else None
+        if role == "long" and direction == "long":
+            return True
+        if role == "short" and direction == "short":
+            return True
+    return False
+
+
 def run_all_triggers(session, master_ticker, followers, indicators, params=None):
     params = params or DEFAULT_PARAMS
+    indicators = indicators or {}
 
     if not _global_mutex_ok(session, params["global_mutex_sec"]):
         return []
 
     hits = []
+    if indicators and indicators.get("data_ok"):
+        indicators.pop("_stale_checked", None)
+    indicator_stale = _update_indicator_stale(session, indicators, params)
+    quality = evaluate_data_quality(
+        session,
+        indicators,
+        repeat_threshold=params.get("indicator_stale_repeat", 3),
+    )
+    session._last_data_quality = quality.to_dict()
+
+    if indicator_stale or not quality.can_direction:
+        # v0.5.34: 冻结期间只允许止损通道 / stale indicators allow stop-loss only.
+        _record_blocked_signal(session, "data_quality_gate", master_ticker, quality)
+        hits = _risk_only_hits(session, [master_ticker] + list(followers or []), params)
+        if hits:
+            _mark_global_triggered(session)
+            return [attach_quality(hits[0], quality)]
+        return []
+
+    check_targeted_breakdown_shadow(session, master_ticker, indicators, params)
 
     trend_hit = check_direction_trend(session, master_ticker, indicators, params)
     if trend_hit:
         hits.append(trend_hit)
+    reversal_hit = None if trend_hit else check_intraday_reversal(session, master_ticker, indicators, params)
+    if reversal_hit:
+        hits.append(reversal_hit)
+    breakdown_hit = None if (trend_hit or reversal_hit) else check_breakdown_warning(session, master_ticker, indicators, params)
+    if breakdown_hit:
+        hits.append(breakdown_hit)
+    bottom_watch_hit = check_capitulation_bottom_watch(session, master_ticker, indicators, params)
+    if bottom_watch_hit:
+        hits.append(bottom_watch_hit)
+    panic_rebound_hit = check_panic_rebound(session, master_ticker, indicators, params)
+    if panic_rebound_hit:
+        hits.append(panic_rebound_hit)
+    crash_rebound_hit = check_crash_rebound_watch(session, master_ticker, indicators, params)
+    if crash_rebound_hit:
+        hits.append(crash_rebound_hit)
 
     if indicators.get("data_ok"):
         for fn in (check_swing_top, check_swing_bottom):
@@ -1408,19 +2788,11 @@ def run_all_triggers(session, master_ticker, followers, indicators, params=None)
         master_dir = master_rapid["direction"]
     elif trend_hit:
         master_dir = trend_hit["direction"]
+    elif reversal_hit:
+        master_dir = reversal_hit["direction"]
 
-    # v0.5.17: follower 标的使用更高的 rapid_move 阈值(1.20%)
-    # v0.5.30: follower 复用 master indicators 做 RSI/量比校验, 解决 has_indicators
-    #          硬门后 follower(原传 None) 永不触发的副作用
-    #          | followers inherit master indicators so the new has_ind gate
-    #          | does not silence them entirely (master is the directional ref)
-    follower_params = {**params, "rapid_move_pct": params.get("rapid_move_pct_follower", params["rapid_move_pct"])}
-    for tk in followers:
-        fh = check_rapid_move(session, tk, indicators, follower_params)
-        if fh:
-            if master_dir and _is_linked(tk, fh["direction"], master_ticker, master_dir):
-                continue
-            hits.append(fh)
+    # v0.5.34: follower rapid_move 不再独立触发; RKLB/RKLX/RKLZ 视为一个经济事件。
+    # follower 仍保留持仓止盈/止损通道,避免 RKLX/RKLZ 同时看多的矛盾推送。
 
     # v0.5.24: profit_target 扩展到 master + followers
     # v0.5.31: follower 复用 master indicators 判断强趋势持有模式
@@ -1442,6 +2814,40 @@ def run_all_triggers(session, master_ticker, followers, indicators, params=None)
         if dd:
             hits.append(dd)
 
+    followup_hits = []
+    held_tickers = []
+    for tk in [master_ticker] + list(followers or []):
+        pos = session.get_position(tk) if hasattr(session, "get_position") else None
+        if pos and (pos.get("qty", 0) or 0) > 0:
+            held_tickers.append(tk)
+            fu = check_position_followup(session, tk, indicators, params)
+            if fu:
+                followup_hits.append(fu)
+
+    if held_tickers:
+        held_set = set(held_tickers)
+        filtered = []
+        for h in hits:
+            trig = h.get("trigger")
+            tk = h.get("ticker")
+            if trig == "direction_trend" and _held_exposure_matches_direction(
+                master_ticker, held_tickers, h.get("direction")
+            ):
+                h["strength"] = "WEAK"
+                data = h.setdefault("data", {})
+                old_cap = data.get("confidence_cap")
+                data["confidence_cap"] = min(old_cap or 65, 65)
+                reasons = data.setdefault("cap_reasons", [])
+                if "held_same_direction_cap" not in reasons:
+                    reasons.append("held_same_direction_cap")
+            if trig == "stop_loss_warning":
+                if h.get("level") != "URGENT" and tk in held_set:
+                    continue
+            if trig in MANAGED_EXIT_TRIGGERS and (tk in held_set or tk == master_ticker):
+                continue
+            filtered.append(h)
+        hits = filtered + followup_hits
+
     # v0.5.24: 去重 — 若某 ticker 当前持仓且盈利覆盖,则 drawdown/overbought/near_resistance
     # 已由 profit_target 接管,移除这些重复 hits 避免两条推送
     # v0.5.27: stop_loss_warning 同样接管亏损持仓的所有派生触发器
@@ -1453,8 +2859,8 @@ def run_all_triggers(session, master_ticker, followers, indicators, params=None)
                                           "near_resistance", "large_day_gain")
                         and (h["ticker"] in pt_covered or h["ticker"] in sl_covered))]
 
-    # v0.5.25: 现金不足时静默"买入方向"信号,避免推送无法操作的噪声
-    # 已持仓的 ticker 不静默(可能加仓用 MIN_ADD_BUDGET_USD $500 门槛)
+    # v0.5.35: 现金不足不再静默方向信号；方向用于判断市场，不等于立刻买入。
+    # | Low cash should not hide market direction; pusher/order plan will block sizing.
     cash = getattr(session, "cash_available", None)
     if cash is not None and cash < MIN_BUDGET_USD:
         BUY_DIR_TRIGGERS = ("swing_bottom", "near_support")
@@ -1462,12 +2868,18 @@ def run_all_triggers(session, master_ticker, followers, indicators, params=None)
         for h in hits:
             is_buy_dir = (
                 h["trigger"] in BUY_DIR_TRIGGERS
-                or (h["trigger"] == "direction_trend" and h.get("direction") == "long")
+                or (h["trigger"] in ("direction_trend", "intraday_reversal") and h.get("direction") == "long")
                 or (h["trigger"] == "rapid_move"      and h.get("direction") == "long")
             )
             # 已持仓 ticker 走加仓门槛($500),不静默
             pos = session.get_position(h["ticker"]) if hasattr(session, "get_position") else None
             has_position = bool(pos and pos.get("qty", 0) > 0)
+            if h["trigger"] in ("direction_trend", "intraday_reversal") and h.get("direction") == "long":
+                h.setdefault("data", {})["cash_limited"] = True
+                h["data"]["cash_available"] = cash
+                h["data"]["min_budget_usd"] = MIN_BUDGET_USD
+                filtered.append(h)
+                continue
             if is_buy_dir and not has_position:
                 print(
                     f"  [swing] silenced {h['trigger']} {h['ticker']} "
@@ -1511,8 +2923,16 @@ def run_all_triggers(session, master_ticker, followers, indicators, params=None)
                     return []
             session._last_directional_push[top["ticker"]] = (top_dir, time.time())
 
-        _mark_global_triggered(session)
-        return [top]
+        gated = _filter_hits_by_quality(session, [top], quality)
+        if gated:
+            try:
+                session._direction_skip_last_emitted = (
+                    f"{top.get('trigger')}/{top.get('direction') or top.get('action_intent') or 'neutral'}"
+                )
+            except Exception:
+                pass
+            _mark_global_triggered(session)
+            return gated
 
     return []
 

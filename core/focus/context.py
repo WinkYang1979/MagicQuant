@@ -66,6 +66,8 @@ class FocusSession:
         # _position_first_seen: focus session 首次见到该持仓的 epoch (兜底)
         self._position_open_time:  dict = {}
         self._position_first_seen: dict = {}
+        self._position_signature: dict = {}
+        self._position_open_time_block_before: dict = {}
 
         self.last_trigger_time = {}
 
@@ -188,6 +190,26 @@ class FocusSession:
         return round((current - trough) / trough * 100, 2)
 
     # ── 持仓 ────────────────────────────────────
+    @staticmethod
+    def _position_signature_from_pos(pos: dict):
+        """Return a compact position signature: quantity + average cost."""
+        if not isinstance(pos, dict):
+            return None
+        try:
+            qty = float(pos.get("qty") or pos.get("position_qty") or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        try:
+            cost = float(
+                pos.get("cost_price")
+                or pos.get("average_cost")
+                or pos.get("avg_cost")
+                or 0
+            )
+        except (TypeError, ValueError):
+            cost = 0.0
+        return (round(qty, 4), round(cost, 4))
+
     def update_positions(self, positions):
         # Futu SDK 偶发返回 list；无论调用方传什么类型，这里统一归一化为 dict
         if isinstance(positions, list):
@@ -199,13 +221,35 @@ class FocusSession:
         positions = positions if isinstance(positions, dict) else {}
         now = time.time()
         # v0.5.3: 首次见到的持仓记录 first_seen；清仓则清理对应缓存
-        for tk in positions:
+        for tk, pos in positions.items():
+            sig = self._position_signature_from_pos(pos)
             if tk not in self._position_first_seen:
                 self._position_first_seen[tk] = now
+                # 新仓位以实时快照为准；过旧成交只用于复盘，不回写实时持仓时间。
+                # Trust the live snapshot first; stale deals must not age a fresh position.
+                self._position_open_time_block_before[tk] = now
+                self.reset_peak_trough(tk)
+            else:
+                prev_sig = self._position_signature.get(tk)
+                if prev_sig and sig:
+                    prev_qty, prev_cost = prev_sig
+                    qty, cost = sig
+                    qty_added = qty > prev_qty + 1e-6
+                    cost_changed = abs(cost - prev_cost) >= 0.005
+                    if qty_added or cost_changed:
+                        # 持仓组合变化: 按当前短线仓位重新计时。
+                        # Position changed: restart age for this short-term lot/composite.
+                        self._position_first_seen[tk] = now
+                        self._position_open_time.pop(tk, None)
+                        self._position_open_time_block_before[tk] = now
+                        self.reset_peak_trough(tk)
+            self._position_signature[tk] = sig
         for tk in list(self._position_first_seen.keys()):
             if tk not in positions:
                 self._position_first_seen.pop(tk, None)
                 self._position_open_time.pop(tk, None)
+                self._position_signature.pop(tk, None)
+                self._position_open_time_block_before.pop(tk, None)
         self.positions_snapshot = positions
         self.positions_fetched_at = now
 
@@ -224,6 +268,9 @@ class FocusSession:
     def set_position_open_time(self, ticker: str, ts: float):
         """v0.5.3: focus_manager 拿到 deal_list 后回写"""
         if ts and ts > 0:
+            block_before = self._position_open_time_block_before.get(ticker)
+            if block_before and float(ts) < block_before - 300:
+                return
             self._position_open_time[ticker] = float(ts)
 
     def get_position(self, ticker: str) -> Optional[dict]:
