@@ -874,6 +874,11 @@ def check_targeted_breakdown_shadow(session, ticker, indicators, params=None):
     return record
 
 
+def _strength_cn(strength: str) -> str:
+    """STRONG → 强烈 / 其他(WEAK/MEDIUM) → 一般。"""
+    return "强烈" if strength == "STRONG" else "一般"
+
+
 def _shadow_record_to_wave_alert(session, record, indicators, params=None):
     """Promote selected shadow records to low-frequency watch alerts. / 将精选影子信号升格为低频看盘提醒。"""
     params = params or DEFAULT_PARAMS
@@ -1670,7 +1675,7 @@ def check_swing_top(session, ticker, indicators, params=None):
             "day_change_pct": _get_day_change(session, ticker),
             "cond_rsi": cond_rsi_weak, "cond_candle": cond_candle, "cond_near": cond_near_high_w,
         },
-        "title": f"🔴 {ticker.replace('US.','')} 波段顶信号 [{strength}]",
+        "title": f"🔴 {ticker.replace('US.','')} 波段顶信号 [{_strength_cn(strength)}]",
     }
 
 
@@ -1762,7 +1767,7 @@ def check_swing_bottom(session, ticker, indicators, params=None):
             "weak_market": weak_market,
             "weak_confirmations": confirm_checks,
         },
-        "title": f"🟢 {ticker.replace('US.','')} 波段底信号 [{strength}]",
+        "title": f"🟢 {ticker.replace('US.','')} 波段底信号 [{_strength_cn(strength)}]",
     }
 
 
@@ -2236,7 +2241,7 @@ def check_panic_rebound(session, ticker, indicators, params=None):
             "below_vwap": bool(vwap and current < vwap),
             "has_indicators": True,
         },
-        "title": f"🔄 {ticker.replace('US.','')} 底部反弹 [{strength}]",
+        "title": f"🔄 {ticker.replace('US.','')} 底部反弹 [{_strength_cn(strength)}]",
     }
 
 
@@ -2343,7 +2348,7 @@ def check_crash_rebound_watch(session, ticker, indicators, params=None):
             "vwap_reclaim": vwap_reclaim,
             "has_indicators": True,
         },
-        "title": f"🔎 {ticker.replace('US.','')} 暴跌反弹观察 [{strength}]",
+        "title": f"🔎 {ticker.replace('US.','')} 暴跌反弹观察 [{_strength_cn(strength)}]",
     }
 
 

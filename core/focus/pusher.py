@@ -2848,7 +2848,7 @@ def _fmt_panic_rebound(hit, session=None):
     m = hit["ticker"].replace("US.", "")
     strength = hit.get("strength", "WEAK")
     lines = [
-        f"🔄 <b>{m} 底部反弹观察 [{strength}]</b>",
+        f"🔄 <b>{m} 底部反弹观察 [{_strength_cn(strength)}]</b>",
         "━━━━━━━━━━━━━━",
         "结论: 暴跌后出现第一段反抽，空头动能开始松动",
         f"现价 {_money(d.get('current'))}  日内 {_num(d.get('day_change_pct'), '+.2f')}%",
@@ -2869,7 +2869,7 @@ def _fmt_crash_rebound_watch(hit, session=None):
     m = hit["ticker"].replace("US.", "")
     strength = hit.get("strength", "WEAK")
     lines = [
-        f"🔎 <b>{m} 暴跌反弹观察 [{strength}]</b>",
+        f"🔎 <b>{m} 暴跌反弹观察 [{_strength_cn(strength)}]</b>",
         "━━━━━━━━━━━━━━",
         "结论: 暴跌后反弹开始出现，先看确认，不给仓位建议",
         f"现价 {_money(d.get('current'))}  日内 {_num(d.get('day_change_pct'), '+.2f')}%",
