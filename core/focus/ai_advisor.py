@@ -19,7 +19,7 @@ from typing import Optional
 
 from core.agents.providers import (
     build_all_providers,
-    ClaudeOpusProvider, ClaudeHaikuProvider,
+    ClaudeOpusProvider, ClaudeSonnetProvider, ClaudeHaikuProvider,
     OpenAIProvider, DeepSeekProvider,
 )
 
@@ -248,8 +248,9 @@ def _build_leader_prompt(
     
     for name, result in advisor_results.items():
         display = {
-            "claude_haiku": "Claude Haiku 4.5",
-            "deepseek":     "DeepSeek V3",
+            "claude_sonnet": "Claude Sonnet 4.6",
+            "claude_haiku":  "Claude Haiku 4.5",
+            "deepseek":      "DeepSeek V4 Pro",
             "gpt_5":        "GPT-5.4 mini",
             "kimi":         "Kimi K2.5",
         }.get(name, name)
@@ -456,7 +457,7 @@ def consult_advisors(
     
     # 4 个顾问(按优先级,没有的跳过) - v0.4.1 加入 Kimi K2.5
     advisor_names = []
-    for n in ["claude_haiku", "deepseek", "gpt_5", "kimi"]:
+    for n in ["claude_sonnet", "deepseek", "gpt_5", "kimi", "claude_haiku"]:
         if n in all_providers:
             advisor_names.append(n)
     
@@ -631,8 +632,9 @@ def _format_summary(
     
     # 4 位顾问独立建议 (v0.4.1 加入 Kimi)
     advisor_display = {
-        "claude_haiku": ("Haiku 4.5", "🟢"),
-        "deepseek":     ("DeepSeek V3", "🟡"),
+        "claude_sonnet": ("Sonnet 4.6", "🟢"),
+        "claude_haiku":  ("Haiku 4.5", "🟢"),
+        "deepseek":      ("DeepSeek V4 Pro", "🟡"),
         "gpt_5":        ("GPT-5.4 mini", "🟣"),
         "kimi":         ("Kimi K2.5", "🔵"),
     }

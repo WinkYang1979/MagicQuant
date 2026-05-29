@@ -37,6 +37,13 @@ try:
 except ImportError:
     HAS_MANUAL_CONSULT = False
 
+# v0.5.36: 手动 AI 临时判盘 / one-shot AI judge
+try:
+    from .ai_judge import run_ai_judge
+    HAS_AI_JUDGE = True
+except ImportError:
+    HAS_AI_JUDGE = False
+
 # v0.3.6: 心跳监控
 try:
     from .heartbeat import (
@@ -78,6 +85,8 @@ __all__ = [
     # 手动召集(v0.3.6)
     "manual_consult",
     "HAS_MANUAL_CONSULT",
+    "run_ai_judge",
+    "HAS_AI_JUDGE",
     # 心跳(v0.3.6)
     "format_heartbeat",
     "get_heartbeat_text",

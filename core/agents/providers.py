@@ -168,6 +168,54 @@ class ClaudeHaikuProvider(ClaudeOpusProvider):
 #  OpenAI GPT-5
 # ══════════════════════════════════════════════════════════════════
 
+class ClaudeSonnetProvider(ClaudeOpusProvider):
+    name = "claude_sonnet"
+    display_name = "Claude Sonnet 4.6"
+    price_input_per_m  = 3.0
+    price_output_per_m = 15.0
+
+    def call(self, system_prompt: str, user_prompt: str,
+             max_tokens: int = 500, timeout: int = 30) -> dict:
+        t0 = time.time()
+        try:
+            payload = json.dumps({
+                "model": "claude-sonnet-4-6",
+                "max_tokens": max_tokens,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": user_prompt}],
+            }).encode()
+            req = urllib.request.Request(
+                "https://api.anthropic.com/v1/messages",
+                data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": self.api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read())
+            text = data["content"][0]["text"]
+            usage = data.get("usage", {})
+            in_tok = usage.get("input_tokens", 0)
+            out_tok = usage.get("output_tokens", 0)
+            cost = self.calc_cost(in_tok, out_tok)
+            result = {
+                "text": text, "input_tokens": in_tok, "output_tokens": out_tok,
+                "cost_usd": cost,
+                "duration_ms": int((time.time() - t0) * 1000),
+                "error": None,
+            }
+            self.record(result)
+            return result
+        except Exception as e:
+            err_msg = f"{type(e).__name__}: {str(e)[:200]}"
+            print(f"  [{self.display_name}] {err_msg}")
+            return {"text": "", "input_tokens": 0, "output_tokens": 0,
+                    "cost_usd": 0, "duration_ms": int((time.time() - t0) * 1000),
+                    "error": err_msg[:200]}
+
+
 class OpenAIProvider(AIProvider):
     name = "gpt_5"
     display_name = "GPT-5.4"
@@ -234,12 +282,12 @@ class OpenAIProvider(AIProvider):
 
 
 # ══════════════════════════════════════════════════════════════════
-#  DeepSeek V3
+#  DeepSeek V4 Pro
 # ══════════════════════════════════════════════════════════════════
 
 class DeepSeekProvider(AIProvider):
     name = "deepseek"
-    display_name = "DeepSeek V3"
+    display_name = "DeepSeek V4 Pro"
     price_input_per_m  = 0.27
     price_output_per_m = 1.10
     
@@ -248,7 +296,7 @@ class DeepSeekProvider(AIProvider):
         t0 = time.time()
         try:
             payload = json.dumps({
-                "model": "deepseek-chat",
+                "model": "deepseek-v4-pro",
                 "max_tokens": max_tokens,
                 "messages": [
                     {"role": "system", "content": system_prompt},
@@ -403,6 +451,7 @@ def build_all_providers() -> dict:
     anthropic_key = _clean_key(os.getenv("ANTHROPIC_API_KEY")) or _clean_key(os.getenv("CLAUDE_API_KEY"))
     if anthropic_key:
         providers["claude_opus"]  = ClaudeOpusProvider(anthropic_key)
+        providers["claude_sonnet"] = ClaudeSonnetProvider(anthropic_key)
         providers["claude_haiku"] = ClaudeHaikuProvider(anthropic_key)
     
     openai_key = _clean_key(os.getenv("OPENAI_API_KEY"))
