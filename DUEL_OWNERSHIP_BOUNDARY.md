@@ -22,7 +22,7 @@
 
 | 文件 | 内容 |
 |---|---|
-| `core/sim_weekly/openai_contestant.py` | OpenAI 选手(trend long/guard short/超卖禁开/14:30禁开/保本锁/禁同bar反手) |
+| `core/sim_weekly/openai_contestant.py` | OpenAI 选手(trend long/guard short/超卖禁开/14:30禁开/保本锁/禁同bar反手)。**v1.3 边界(2026-05-30 通报): RKLB 只作信号源, 不交易; 只交易 RKLX/RKLZ。** 这是 OpenAI 的策略选择, 非公共契约; Claude 仍可自主决定是否交易 RKLB。 |
 | `data/sim_weekly/openai_adaptive_*.json`、`openai_adjustment_log.json` | OpenAI 自适应配置/状态/留痕 |
 | `scripts/sim_weekly_openai_nightly_review.py` | OpenAI 夜间复盘 |
 
