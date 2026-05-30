@@ -27,19 +27,8 @@ ENTRY_CUTOFF = time(15, 30)   # 收盘前 30 分钟不再开新仓
 # profile=neutral 即当前默认行为;bull_ride 放宽止损/加仓/降 churn/牛市避空。
 DEFAULT_ADAPTIVE_CONFIG = {
     "profile": "neutral",
-    "hypothesis_id": "trend_hold_v1",
+    "hypothesis_id": "neutral_v1",
     "params": {
-        # v1.4 框架切换(2026-05-30 回放定稿): 默认走"多日趋势持有",非日内进出。
-        # 诊断: 日内框架(v1.2)在 IPO 前上涨行情风调仅 0.15、去掉最好周为负——
-        # churn 漏掉大趋势。趋势持有用慢趋势(EMA_slow)选标的并持有不 churn:
-        # 11周冻结集+近期回放 风调 0.15→0.49(≈躺平RKLB 0.50)、去掉最好周 -0.50%→+3.34%、
-        # churn 121→33,且下行周空仓避险(躺平不会)。framework="day_trade" 可退回 v1.2。
-        "framework": "trend_hold",
-        "th_ema_slow": 50,          # 慢趋势 EMA 周期(根 5m bar, ~多日)
-        "th_strong_dist": 1.0,      # price 高于 EMA_slow >=此% 且多头结构 → 持 RKLX(2x)
-        "th_mild_dist": 0.0,        # price 高于 EMA_slow >=此% → 持 RKLB
-        "th_hold_stop": 0.12,       # 持有挡宽追踪止损(让趋势跑, 回撤才出)
-        # --- 以下为 day_trade 框架(v1.2)参数, framework="day_trade" 时生效 ---
         "entry_conv": 70,
         "frac_strong": 0.75,        # conv>=85
         "frac_weak": 0.45,          # conv>=70
@@ -131,72 +120,8 @@ class ClaudeRuleContestant(Contestant):
         tk = next(iter(pf.positions))
         return "short" if tk == "RKLZ" else "long"
 
-    def _trend_regime(self, ctx):
-        """v1.4 多日趋势: 慢趋势 EMA + 多头结构 → 选标的(RKLX/RKLB/空仓)。"""
-        from . import indicators as ind
-        p = self._p
-        ema_slow = int(p.get("th_ema_slow", 50))
-        hist = ctx.history["RKLB"] + [ctx.bars_now["RKLB"]]
-        if len(hist) < ema_slow:
-            return None
-        closes = [b["close"] for b in hist]
-        e_slow = ind.ema(closes[-ema_slow - 5:], ema_slow)
-        e9, e21 = ind.ema(closes[-30:], 9), ind.ema(closes[-30:], 21)
-        if None in (e_slow, e9, e21) or e_slow <= 0:
-            return None
-        cur = closes[-1]
-        dist = (cur - e_slow) / e_slow * 100
-        up_struct = e9 > e21 and cur > e_slow
-        if up_struct and dist >= float(p.get("th_strong_dist", 1.0)):
-            return "RKLX"
-        if up_struct and dist >= float(p.get("th_mild_dist", 0.0)):
-            return "RKLB"
-        return None  # 空仓避险
-
-    def _on_bar_trend_hold(self, ctx: BarContext) -> None:
-        """v1.4 多日趋势持有: 慢信号选标的并持有不 churn, 趋势破才走。"""
-        pf = ctx.portfolio
-        hold_stop = float(self._p.get("th_hold_stop", 0.12))
-        target = None if ctx.is_last_bar else self._trend_regime(ctx)
-        held = next(iter(pf.positions)) if pf.positions else None
-
-        # 趋势破 / 换标的 → 平当前
-        if held and held != target:
-            pf.sell(held, pf.positions[held]["qty"],
-                    ctx.price(held) or pf.positions[held]["cost_price"], ctx.ts,
-                    reason="trend exit" if target is None else "trend switch")
-            held = None
-
-        # 有目标且空仓 → 满仓买入持有
-        if target and held is None and not ctx.is_last_bar:
-            px = ctx.price(target)
-            if px:
-                qty = int(pf.cash / (px * 1.001))
-                if qty > 0:
-                    pf.buy(target, qty, px, ctx.ts, reason=f"trend hold {target}",
-                           stop=round(px * (1 - hold_stop), 4))
-                    if target in pf.positions:
-                        pf.positions[target]["stop_pct"] = hold_stop
-
-        # 宽追踪止损(让趋势跑, 回撤才出)
-        for tk in list(pf.positions.keys()):
-            pos = pf.positions[tk]
-            bar = ctx.bars_now.get(tk)
-            if not bar:
-                continue
-            pos["peak"] = max(pos.get("peak", pos["cost_price"]), bar["high"])
-            trail = round(pos["peak"] * (1 - hold_stop), 4)
-            pos["stop"] = trail if pos.get("stop") is None else max(pos["stop"], trail)
-            if bar["low"] <= pos["stop"]:
-                pf.sell(tk, pos["qty"], pos["stop"], ctx.ts, reason="hold trail stop")
-
     def on_bar(self, ctx: BarContext) -> None:
         self.bar_idx += 1
-        # v1.4: 默认走多日趋势持有框架; framework="day_trade" 退回 v1.2 日内
-        if str(self._p.get("framework", "trend_hold")) == "trend_hold":
-            self._on_bar_trend_hold(ctx)
-            return
-
         pf = ctx.portfolio
         prices = {tk: ctx.price(tk) for tk in ("RKLB", "RKLX", "RKLZ")}
 
