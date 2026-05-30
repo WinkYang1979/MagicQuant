@@ -1,8 +1,15 @@
-"""SimWeekly 决策策略 v1.1 —— 自包含规则版(进取,但抗横跳)。
+"""SimWeekly 决策策略 v1.2 —— 自包含规则版(进取,抗横跳,拐点过滤)。
 
 输出**方向**(long/short/flat)+ 表达工具 + 信念 + 止损带。
 engine 据此做"持有/翻转/进场",同方向不切工具、不因信念抖动平仓(让赢家跑)。
 后续可用 deciders.AgentCommitteeDecider 替换,接口一致。
+
+v1.2 (2026-05-30): RSI 拐点过滤 —— 做多上限 75→72(不追过热波峰)、
+  做空下限 25→40 硬下限(不空在超卖波谷)。根因: 震荡日策略在 RSI 极值
+  逆袭被反转打脸(5-29 两笔超卖做空 RSI33/37 占当日亏损 88%)。
+  11 周冻结集+近期回放(6方案A/B, 跨牛/熊/震荡): 均收益 -0.09%→+0.91%、
+  风调 -0.01→+0.15、最差周 -11.71%→-6.75%、churn 142→121。
+  不设 strong 趋势豁免(A/B 证明豁免会放回亏损的超卖趋势单, 风调反降)。
 
 decide(ctx) -> {"direction","instrument","conviction","stop_pct","reason"}
   direction: "long"/"short"/"flat"
@@ -15,9 +22,9 @@ from typing import List
 from . import indicators as ind
 
 STOP_PCT = {"RKLB": 0.025, "RKLX": 0.045, "RKLZ": 0.045}
-RKLX_CONV = 82      # 多头信念 >= 此值用 2x 工具 RKLX,否则 RKLB
-SHORT_RSI_FLOOR = 38  # 超卖不追空:RKLB RSI < 38 时禁做空(移植主策略血泪教训,
-                      # 05-29 复盘:rsi26/29/33/37 四笔做空全亏,反弹打脸)
+RKLX_CONV = 82       # 多头信念 >= 此值用 2x 工具 RKLX,否则 RKLB
+LONG_RSI_MAX = 72    # v1.2: 做多 RSI 上限,高于此不追多(过热波峰)
+SHORT_RSI_MIN = 40   # v1.2: 做空 RSI 下限,低于此不追空(超卖波谷,无 strong 豁免)
 
 
 def _rsi_slope(closes: List[float]) -> float | None:
@@ -80,17 +87,14 @@ def decide(ctx: dict) -> dict:
         base = STOP_PCT[inst]
         return round(min(base * 1.8, 0.09), 4) if strong else base
 
-    if e9 > e21 and price > vwap and 50 <= rsi <= 75:
+    # v1.2 拐点过滤: 做多不追过热(rsi<=72)、做空不空超卖(rsi>=40, 硬下限无豁免)
+    if e9 > e21 and price > vwap and 50 <= rsi <= LONG_RSI_MAX:
         conv = _conviction(gap_atr, rsi, dist_vwap_pct, up=True, rsi_slope=rsi_delta)
         inst = "RKLX" if conv >= RKLX_CONV else "RKLB"
         return {"direction": "long", "instrument": inst, "conviction": conv,
                 "stop_pct": _stop(inst), "strong": strong,
                 "reason": f"5m up e9>e21 px>vwap rsi{rsi:.0f} gapATR{gap_atr:.1f}{' STRONG' if strong else ''}"}
-    # 超卖做空 regime 化:RSI<38 时,仅"强下跌延续"(gapATR>=1)才允许追空;
-    # 震荡/弱势里超卖做空=追 RKLZ 进反弹被打(05-29 四笔全亏的根因)。
-    # 强下跌里超卖继续跌(02-02),该放行。
-    short_ok = e9 < e21 and price < vwap and rsi <= 50 and (rsi >= SHORT_RSI_FLOOR or strong)
-    if short_ok:
+    if e9 < e21 and price < vwap and SHORT_RSI_MIN <= rsi <= 50:
         conv = _conviction(gap_atr, rsi, dist_vwap_pct, up=False, rsi_slope=rsi_delta)
         return {"direction": "short", "instrument": "RKLZ", "conviction": conv,
                 "stop_pct": _stop("RKLZ"), "strong": strong,
