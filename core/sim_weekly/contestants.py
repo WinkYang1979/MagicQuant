@@ -33,16 +33,14 @@ DEFAULT_ADAPTIVE_CONFIG = {
         # 约束: Claude 只交易 RKLX(用 RKLB 判趋势, 买卖 RKLX), 不碰 RKLB/RKLZ。
         # 诊断: 强上行行情里, 主动日内择时(v1.2)赚得远少于躺平(8周$1664 vs 躺平RKLX$14495)。
         # 用户定向: 趋势持有 + 偏躺平。低进场门(早进)+宽出场(几乎不避险)→ 最大化捕获。
-        # v1.5 浮盈锁定(2026-05-31, 学 OpenAI 思路自实现): 浮盈达 lock_trig → 追踪止损收紧到
-        #   lock_tight, 锁住大部分浮盈。A/B 实测既多赚又改善最差周(金字塔加仓相反, 弃用)。
+        # 8周协议美元 $10806 = 躺平RKLX($14495) 的 75%; churn 19(真持有);
+        #   近4周加权 +17.42%(躺平 +21.56%); 最差周 -22.31%(2x工具固有)。止18>止14(更赚且回撤更浅)。
         # framework="day_trade" 可退回 v1.2 日内拐点过滤。
         "framework": "rklx_hold",
         "th_ema_slow": 40,          # 慢趋势 EMA 周期(根 5m bar)
         "th_enter_dist": 0.0,       # price 高于 EMA_slow >=此% 且多头结构 → 进场买 RKLX
         "th_exit_margin": 0.08,     # price 跌破 EMA_slow*(1-此值) → 趋势明确破, 出场(宽=偏躺平)
         "th_hold_stop": 0.18,       # 持有追踪止损(宽=让趋势跑/逼近躺平)
-        "th_lock_trig": 0.12,       # v1.5: 浮盈(现价较成本)达此 → 触发锁定
-        "th_lock_tight": 0.06,      # v1.5: 锁定后追踪止损收紧到此(保住浮盈)
         # --- 以下为 day_trade 框架(v1.2)参数, framework="day_trade" 时生效 ---
         "entry_conv": 70,
         "frac_strong": 0.75,        # conv>=85
@@ -166,14 +164,7 @@ class ClaudeRuleContestant(Contestant):
             bar = ctx.bars_now.get(held)
             if bar:
                 pos["peak"] = max(pos.get("peak", pos["cost_price"]), bar["high"])
-                # v1.5 浮盈锁定: 浮盈达 lock_trig → 追踪止损收紧, 保住大部分浮盈
-                stop_pct = hold_stop
-                lock_trig = p.get("th_lock_trig")
-                if lock_trig is not None and pos["cost_price"] > 0:
-                    gain = (bar["high"] - pos["cost_price"]) / pos["cost_price"]
-                    if gain >= float(lock_trig):
-                        stop_pct = float(p.get("th_lock_tight", hold_stop))
-                trail = round(pos["peak"] * (1 - stop_pct), 4)
+                trail = round(pos["peak"] * (1 - hold_stop), 4)
                 pos["stop"] = trail if pos.get("stop") is None else max(pos["stop"], trail)
                 broke = info is not None and info[0] < info[1] * (1 - exit_margin)
                 if bar["low"] <= pos["stop"] or broke or ctx.is_last_bar:
