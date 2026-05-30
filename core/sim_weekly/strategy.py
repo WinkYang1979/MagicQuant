@@ -16,6 +16,8 @@ from . import indicators as ind
 
 STOP_PCT = {"RKLB": 0.025, "RKLX": 0.045, "RKLZ": 0.045}
 RKLX_CONV = 82      # 多头信念 >= 此值用 2x 工具 RKLX,否则 RKLB
+SHORT_RSI_FLOOR = 38  # 超卖不追空:RKLB RSI < 38 时禁做空(移植主策略血泪教训,
+                      # 05-29 复盘:rsi26/29/33/37 四笔做空全亏,反弹打脸)
 
 
 def _rsi_slope(closes: List[float]) -> float | None:
@@ -84,7 +86,11 @@ def decide(ctx: dict) -> dict:
         return {"direction": "long", "instrument": inst, "conviction": conv,
                 "stop_pct": _stop(inst), "strong": strong,
                 "reason": f"5m up e9>e21 px>vwap rsi{rsi:.0f} gapATR{gap_atr:.1f}{' STRONG' if strong else ''}"}
-    if e9 < e21 and price < vwap and 25 <= rsi <= 50:
+    # 超卖做空 regime 化:RSI<38 时,仅"强下跌延续"(gapATR>=1)才允许追空;
+    # 震荡/弱势里超卖做空=追 RKLZ 进反弹被打(05-29 四笔全亏的根因)。
+    # 强下跌里超卖继续跌(02-02),该放行。
+    short_ok = e9 < e21 and price < vwap and rsi <= 50 and (rsi >= SHORT_RSI_FLOOR or strong)
+    if short_ok:
         conv = _conviction(gap_atr, rsi, dist_vwap_pct, up=False, rsi_slope=rsi_delta)
         return {"direction": "short", "instrument": "RKLZ", "conviction": conv,
                 "stop_pct": _stop("RKLZ"), "strong": strong,
