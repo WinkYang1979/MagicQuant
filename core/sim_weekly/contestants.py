@@ -36,15 +36,6 @@ DEFAULT_ADAPTIVE_CONFIG = {
         "cooldown_bars": 3,
         "avoid_shorts_in_bull": False,
         "bull_long_rsi_max": 80,    # bull_ride 容忍更热的 RSI
-        # v1.3 regime-持有挡(2026-05-30 回放定稿,跨11周冻结集+近期):
-        # 当周 RKLB 累计涨幅 >= regime_week_pct 且 EMA 多头排列 → 转"持有挡":
-        # 满仓骑 regime_ride 标的、只用宽追踪止损,不做日内频繁进出(吃 beta/降 churn)。
-        # 回放: 均收益 +0.91%→+4.30%、风调 0.21→0.37、去掉最好一周 +0.35%→+3.45%、
-        # churn 124→39,最差周 -7.05% 不变。否则退回日内择时(v1.2 拐点过滤)。
-        "regime_hold": True,
-        "regime_week_pct": 3.0,     # 当周累计涨幅触发持有挡的阈值(%)
-        "regime_hold_stop": 0.12,   # 持有挡宽追踪止损(让趋势跑,回撤 12% 才出)
-        "regime_ride": "RKLB",      # 持有挡骑的标的(RKLB 稳/RKLX 2x激进但回撤大)
     },
 }
 
@@ -106,7 +97,6 @@ class ClaudeRuleContestant(Contestant):
         self.last_exit_idx = -999
         self.last_exit_dir: Optional[str] = None
         self.bar_idx = 0
-        self._week_open = None      # v1.3 regime-持有挡: 本周首根 RKLB 收盘价
 
     def reset(self, capital: float) -> None:
         # 每周/每次开跑重读配置 —— 夜间复盘写的调整在此生效(活的自适应)
@@ -115,26 +105,6 @@ class ClaudeRuleContestant(Contestant):
         self.last_exit_idx = -999
         self.last_exit_dir = None
         self.bar_idx = 0
-        self._week_open = None
-
-    def _strong_uptrend(self, ctx) -> bool:
-        """v1.3: 当周 RKLB 累计涨幅达标 + EMA 多头排列 + 价在 e9 上 → 强上行。"""
-        from . import indicators as ind
-        hist = ctx.history["RKLB"] + [ctx.bars_now["RKLB"]]
-        if len(hist) < 25:
-            return False
-        if self._week_open is None:
-            self._week_open = hist[0]["close"]
-        cur = hist[-1]["close"]
-        if not self._week_open:
-            return False
-        week_chg = (cur - self._week_open) / self._week_open * 100
-        closes = [b["close"] for b in hist]
-        e9, e21 = ind.ema(closes[-30:], 9), ind.ema(closes[-30:], 21)
-        if e9 is None or e21 is None:
-            return False
-        return (week_chg >= float(self._p.get("regime_week_pct", 3.0))
-                and e9 > e21 and cur >= e9)
 
     @property
     def _p(self) -> dict:
@@ -154,38 +124,6 @@ class ClaudeRuleContestant(Contestant):
         self.bar_idx += 1
         pf = ctx.portfolio
         prices = {tk: ctx.price(tk) for tk in ("RKLB", "RKLX", "RKLZ")}
-
-        # 0) v1.3 regime-持有挡: 强上行周 → 满仓骑趋势 + 宽追踪止损,不做日内进出
-        p0 = self._p
-        if p0.get("regime_hold") and not ctx.is_last_bar and self._strong_uptrend(ctx):
-            ride = p0.get("regime_ride", "RKLB")
-            hold_stop = float(p0.get("regime_hold_stop", 0.12))
-            px = ctx.price(ride)
-            held_tk = next(iter(pf.positions)) if pf.positions else None
-            # 持有非 ride 标的(如日内 RKLZ 空头)→ 先平,转入趋势骑乘
-            if held_tk and held_tk != ride:
-                pf.sell(held_tk, pf.positions[held_tk]["qty"],
-                        ctx.price(held_tk) or pf.positions[held_tk]["cost_price"],
-                        ctx.ts, reason="regime flip to hold")
-                held_tk = None
-            if held_tk is None and px:
-                qty = int(pf.cash / (px * 1.001))
-                if qty > 0:
-                    pf.buy(ride, qty, px, ctx.ts, reason=f"regime hold ride {ride}",
-                           stop=round(px * (1 - hold_stop), 4))
-                    if ride in pf.positions:
-                        pf.positions[ride]["stop_pct"] = hold_stop
-            # 宽追踪止损(让趋势跑,回撤才出)
-            for tk in list(pf.positions.keys()):
-                pos = pf.positions[tk]; bar = ctx.bars_now.get(tk)
-                if not bar:
-                    continue
-                pos["peak"] = max(pos.get("peak", pos["cost_price"]), bar["high"])
-                trail = round(pos["peak"] * (1 - hold_stop), 4)
-                pos["stop"] = trail if pos.get("stop") is None else max(pos["stop"], trail)
-                if bar["low"] <= pos["stop"]:
-                    pf.sell(tk, pos["qty"], pos["stop"], ctx.ts, reason="hold trail stop")
-            return
 
         # 1) 跟踪止损(用本根 bar 的 low 判穿)
         for tk in list(pf.positions.keys()):
