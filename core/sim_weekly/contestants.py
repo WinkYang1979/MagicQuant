@@ -27,8 +27,21 @@ ENTRY_CUTOFF = time(15, 30)   # 收盘前 30 分钟不再开新仓
 # profile=neutral 即当前默认行为;bull_ride 放宽止损/加仓/降 churn/牛市避空。
 DEFAULT_ADAPTIVE_CONFIG = {
     "profile": "neutral",
-    "hypothesis_id": "neutral_v1",
+    "hypothesis_id": "rklx_hold_v1",
     "params": {
+        # v1.4 框架(2026-05-31 美元口径回放定稿): 默认 "RKLX 趋势持有, 偏向躺平/收益优先"。
+        # 约束: Claude 只交易 RKLX(用 RKLB 判趋势, 买卖 RKLX), 不碰 RKLB/RKLZ。
+        # 诊断: 强上行行情里, 主动日内择时(v1.2)赚得远少于躺平(8周$1664 vs 躺平RKLX$14495)。
+        # 用户定向: 趋势持有 + 偏躺平。低进场门(早进)+宽出场(几乎不避险)→ 最大化捕获。
+        # 8周协议美元 $10806 = 躺平RKLX($14495) 的 75%; churn 19(真持有);
+        #   近4周加权 +17.42%(躺平 +21.56%); 最差周 -22.31%(2x工具固有)。止18>止14(更赚且回撤更浅)。
+        # framework="day_trade" 可退回 v1.2 日内拐点过滤。
+        "framework": "rklx_hold",
+        "th_ema_slow": 40,          # 慢趋势 EMA 周期(根 5m bar)
+        "th_enter_dist": 0.0,       # price 高于 EMA_slow >=此% 且多头结构 → 进场买 RKLX
+        "th_exit_margin": 0.08,     # price 跌破 EMA_slow*(1-此值) → 趋势明确破, 出场(宽=偏躺平)
+        "th_hold_stop": 0.18,       # 持有追踪止损(宽=让趋势跑/逼近躺平)
+        # --- 以下为 day_trade 框架(v1.2)参数, framework="day_trade" 时生效 ---
         "entry_conv": 70,
         "frac_strong": 0.75,        # conv>=85
         "frac_weak": 0.45,          # conv>=70
@@ -120,8 +133,67 @@ class ClaudeRuleContestant(Contestant):
         tk = next(iter(pf.positions))
         return "short" if tk == "RKLZ" else "long"
 
+    def _rklx_hold_ind(self, ctx):
+        """v1.4: 慢趋势 EMA + 多头结构。返回 (price, ema_slow, e9, e21) 或 None。"""
+        from . import indicators as ind
+        ema_slow = int(self._p.get("th_ema_slow", 40))
+        hist = ctx.history["RKLB"] + [ctx.bars_now["RKLB"]]
+        if len(hist) < ema_slow:
+            return None
+        closes = [b["close"] for b in hist]
+        e_slow = ind.ema(closes[-ema_slow - 5:], ema_slow)
+        e9, e21 = ind.ema(closes[-30:], 9), ind.ema(closes[-30:], 21)
+        if None in (e_slow, e9, e21) or e_slow <= 0:
+            return None
+        return closes[-1], e_slow, e9, e21
+
+    def _on_bar_rklx_hold(self, ctx: BarContext) -> None:
+        """v1.4 RKLX 趋势持有(偏躺平): 早进 + 宽出, 几乎不避险, 最大化趋势捕获。
+        只交易 RKLX(用 RKLB 判趋势)。"""
+        pf = ctx.portfolio
+        p = self._p
+        exit_margin = float(p.get("th_exit_margin", 0.08))
+        hold_stop = float(p.get("th_hold_stop", 0.18))
+        enter_dist = float(p.get("th_enter_dist", 0.0))
+        held = next(iter(pf.positions)) if pf.positions else None
+        info = self._rklx_hold_ind(ctx)
+
+        # 持仓中: 仅 趋势明确破(price < EMA_slow*(1-exit_margin)) 或 追踪止损 才退
+        if held:
+            pos = pf.positions[held]
+            bar = ctx.bars_now.get(held)
+            if bar:
+                pos["peak"] = max(pos.get("peak", pos["cost_price"]), bar["high"])
+                trail = round(pos["peak"] * (1 - hold_stop), 4)
+                pos["stop"] = trail if pos.get("stop") is None else max(pos["stop"], trail)
+                broke = info is not None and info[0] < info[1] * (1 - exit_margin)
+                if bar["low"] <= pos["stop"] or broke or ctx.is_last_bar:
+                    px = pos["stop"] if bar["low"] <= pos["stop"] else (ctx.price(held) or pos["cost_price"])
+                    pf.sell(held, pos["qty"], px, ctx.ts,
+                            reason="hold trail stop" if bar["low"] <= pos["stop"] else "trend broke")
+            return
+
+        # 空仓: 多头结构 且 price 高于 EMA_slow 达 enter_dist% → 满仓买 RKLX
+        if not ctx.is_last_bar and info is not None:
+            cur, e_slow, e9, e21 = info
+            dist = (cur - e_slow) / e_slow * 100
+            if e9 > e21 and dist >= enter_dist:
+                px = ctx.price("RKLX")
+                if px:
+                    qty = int(pf.cash / (px * 1.001))
+                    if qty > 0:
+                        pf.buy("RKLX", qty, px, ctx.ts, reason="rklx trend hold",
+                               stop=round(px * (1 - hold_stop), 4))
+                        if "RKLX" in pf.positions:
+                            pf.positions["RKLX"]["stop_pct"] = hold_stop
+
     def on_bar(self, ctx: BarContext) -> None:
         self.bar_idx += 1
+        # v1.4: 默认 RKLX 趋势持有框架; framework="day_trade" 退回 v1.2 日内
+        if str(self._p.get("framework", "rklx_hold")) == "rklx_hold":
+            self._on_bar_rklx_hold(ctx)
+            return
+
         pf = ctx.portfolio
         prices = {tk: ctx.price(tk) for tk in ("RKLB", "RKLX", "RKLZ")}
 
