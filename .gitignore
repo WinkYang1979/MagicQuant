@@ -16,3 +16,30 @@ logs/
 Thumbs.db
 env
 !*.env.example
+
+# Runtime market data / 运行期行情与复盘数据
+data/arena/
+data/backtest/
+data/benchmark/
+data/briefing/
+data/champion_stability/
+data/contenders/
+data/edge/
+data/historical/
+data/portfolio/
+data/review/
+data/review_reports/
+data/shared/
+data/sim_weekly/
+data/dashboard_feed.json
+data/ta_version_check.json
+
+# Research outputs, keep source files visible / 研究输出忽略，源码保留可见
+research/vectorbt_lab/data/
+research/vectorbt_lab/output/
+research/vectorbt_lab/state/
+
+# Generated reports / 自动生成报告
+reports/
+journal/
+trial/
