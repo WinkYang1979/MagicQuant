@@ -27,6 +27,8 @@ AI_ANALYSIS_FILE    = os.path.join(BASE_DIR, "data", "ai_analysis.json")
 FOCUS_STATE_FILE    = os.path.join(BASE_DIR, "data", "focus_state.json")
 AI_ADVISOR_HISTORY  = os.path.join(BASE_DIR, "data", "ai_advisor_history.json")
 AI_ADVISOR_COST     = os.path.join(BASE_DIR, "data", "ai_advisor_cost.json")
+CHAMPION_HEALTH_FILE = os.path.join(BASE_DIR, "data", "champion_stability", "latest.json")
+CONTENDER_BOARD_FILE = os.path.join(BASE_DIR, "data", "contenders", "latest.json")
 
 
 def read_file_safe(path: str):
@@ -128,6 +130,41 @@ class Handler(BaseHTTPRequestHandler):
                 })
                 self._serve(200, "application/json; charset=utf-8", default.encode(),
                             extra_headers={"Access-Control-Allow-Origin": "*"})
+        elif path == "/champion_health":
+            data = read_file_safe(CHAMPION_HEALTH_FILE)
+            if data:
+                self._serve(200, "application/json; charset=utf-8", data.encode(),
+                            extra_headers={"Access-Control-Allow-Origin": "*",
+                                          "Cache-Control": "no-cache"})
+            else:
+                default = json.dumps({
+                    "current_champion": "UNKNOWN",
+                    "health_score": 0,
+                    "status": "DANGER",
+                    "recommendation": "REPLACE",
+                    "failure_signals": {"warning_level": "HIGH"},
+                })
+                self._serve(200, "application/json; charset=utf-8", default.encode(),
+                            extra_headers={"Access-Control-Allow-Origin": "*",
+                                          "Cache-Control": "no-cache"})
+        elif path == "/contender_board":
+            data = read_file_safe(CONTENDER_BOARD_FILE)
+            if data:
+                self._serve(200, "application/json; charset=utf-8", data.encode(),
+                            extra_headers={"Access-Control-Allow-Origin": "*",
+                                          "Cache-Control": "no-cache"})
+            else:
+                default = json.dumps({
+                    "current_champion": "UNKNOWN",
+                    "champion_health": 0,
+                    "threat_level": "LOW",
+                    "recommended_successor": "NONE",
+                    "final_recommendation": "KEEP",
+                    "promotion_watchlist": [],
+                })
+                self._serve(200, "application/json; charset=utf-8", default.encode(),
+                            extra_headers={"Access-Control-Allow-Origin": "*",
+                                          "Cache-Control": "no-cache"})
         elif path == "/health":
             self._serve(200, "application/json",
                         json.dumps({"status": "ok", "time": datetime.now().isoformat()}).encode())

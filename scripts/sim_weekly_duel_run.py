@@ -77,6 +77,8 @@ def _is_trade_window(et: datetime, trade_hours: str) -> bool:
 
 
 def _is_settle_time(et: datetime, trade_hours: str) -> bool:
+    if et.weekday() > 4:
+        return True
     if et.weekday() != 4:
         return False
     cutoff = ALL_HOURS_WEEKDAY_END if trade_hours == "all" else RTH_END
@@ -379,10 +381,14 @@ def _step_account(account: LiveAccount, now: datetime, prices: dict[str, float],
     if not state.get("week_open_rklb") and prices.get("RKLB"):
         state["week_open_rklb"] = prices["RKLB"]
 
+    if _is_settle_time(now, trade_hours) and prices:
+        settle_reason = f"friday {trade_hours} settle" if now.weekday() == 4 else f"weekend {trade_hours} settle"
+        account.settle(prices, now.replace(second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S"),
+                       reason=settle_reason)
+        account.save(prices)
+        return
+
     if not _is_trade_window(now, trade_hours):
-        if _is_settle_time(now, trade_hours) and prices:
-            account.settle(prices, now.replace(second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S"),
-                           reason=f"friday {trade_hours} settle")
         account.save(prices)
         return
 

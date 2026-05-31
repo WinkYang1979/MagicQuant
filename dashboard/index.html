@@ -38,6 +38,14 @@ body{background:#0f0f0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
 .loading .status-dot{background:#666;animation:pulse 1s infinite}
 @keyframes pulse{0%,100%{opacity:.3}50%{opacity:1}}
 
+.health-widget{display:grid;grid-template-columns:1fr repeat(3,auto);gap:10px;align-items:center;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:12px}
+.health-title{font-size:11px;color:#666;text-transform:uppercase;letter-spacing:.08em}
+.health-main{font-family:var(--mono);font-size:14px;color:#fff;font-weight:700}
+.health-pill{font-size:11px;border-radius:5px;padding:3px 8px;border:1px solid var(--border);color:#888}
+.health-pill.healthy{color:var(--green);border-color:var(--green-border);background:var(--green-bg)}
+.health-pill.watch{color:var(--amber);border-color:var(--amber-border);background:var(--amber-bg)}
+.health-pill.danger{color:var(--red);border-color:var(--red-border);background:var(--red-bg)}
+
 .main-layout{display:grid;grid-template-columns:260px 1fr;gap:12px;align-items:start}
 @media(max-width:768px){.main-layout{grid-template-columns:1fr}}
 
@@ -161,6 +169,26 @@ body{background:#0f0f0f;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-seri
     <span id="statusText">正在连接...</span>
   </div>
 
+  <div class="health-widget" id="championHealth">
+    <div>
+      <div class="health-title">Champion Health</div>
+      <div class="health-main" id="healthChampion">UNKNOWN</div>
+    </div>
+    <div class="health-pill danger" id="healthScore">0</div>
+    <div class="health-pill danger" id="healthStatus">DANGER</div>
+    <div class="health-pill danger" id="healthRecommendation">REPLACE</div>
+  </div>
+
+  <div class="health-widget" id="contenderBoard">
+    <div>
+      <div class="health-title">Contender Board</div>
+      <div class="health-main" id="contenderChampion">UNKNOWN</div>
+    </div>
+    <div class="health-pill watch" id="topChallenger">NONE</div>
+    <div class="health-pill watch" id="threatLevel">LOW</div>
+    <div class="health-pill watch" id="promotionRecommendation">KEEP</div>
+  </div>
+
   <div class="main-layout">
     <div class="card-col" id="cardCol">
       <div class="card" style="opacity:.3;height:90px"></div>
@@ -183,12 +211,51 @@ const API    = 'http://localhost:5000/signals';
 const AI_API = 'http://localhost:5000/ai_analysis';
 const ASK_API= 'http://localhost:5000/ask_result';
 const QUICK_API='http://localhost:5000/quick_advice';
+const HEALTH_API='http://localhost:5000/champion_health';
+const CONTENDER_API='http://localhost:5000/contender_board';
 let allData=[], aiData={}, askData={}, quickData={}, selected=null, countdown=30, aiLoading={};
 
 const cls  = s => s==='BUY'?'bull':s==='SELL'?'bear':'neut';
 const lbl  = s => s==='BUY'?'买入':s==='SELL'?'观望':'持有';
 const sgn  = v => v>=0?'+':'';
 const dCls = s => s==='BUY'?'bull-dot':s==='SELL'?'bear-dot':'neut-dot';
+
+function healthClass(status){
+  if(status==='HEALTHY'||status==='KEEP') return 'healthy';
+  if(status==='WATCH') return 'watch';
+  return 'danger';
+}
+
+function renderChampionHealth(h){
+  if(!h) return;
+  const champ=document.getElementById('healthChampion');
+  const score=document.getElementById('healthScore');
+  const status=document.getElementById('healthStatus');
+  const rec=document.getElementById('healthRecommendation');
+  const warning=h.failure_signals&&h.failure_signals.warning_level?` / ${h.failure_signals.warning_level}`:'';
+  champ.textContent=h.current_champion||'UNKNOWN';
+  score.textContent=`Score ${h.health_score ?? 0}`;
+  status.textContent=(h.status||'DANGER')+warning;
+  rec.textContent=h.recommendation||'REPLACE';
+  score.className='health-pill '+healthClass(h.status);
+  status.className='health-pill '+healthClass(h.status);
+  rec.className='health-pill '+healthClass(h.recommendation);
+}
+
+function renderContenderBoard(c){
+  if(!c) return;
+  const champ=document.getElementById('contenderChampion');
+  const challenger=document.getElementById('topChallenger');
+  const threat=document.getElementById('threatLevel');
+  const rec=document.getElementById('promotionRecommendation');
+  const top=(c.promotion_watchlist&&c.promotion_watchlist.length>0)?c.promotion_watchlist[0]:null;
+  champ.textContent=c.current_champion||'UNKNOWN';
+  challenger.textContent=top?`${top.strategy_id} ${top.contender_score}`:'NONE';
+  threat.textContent=c.threat_level||'LOW';
+  rec.textContent=c.final_recommendation||'KEEP';
+  threat.className='health-pill '+healthClass(c.threat_level==='HIGH'?'DANGER':c.threat_level==='MEDIUM'?'WATCH':'HEALTHY');
+  rec.className='health-pill '+healthClass(c.final_recommendation==='PROMOTE'?'DANGER':c.final_recommendation);
+}
 
 // 风险警报
 function renderAlerts(signals){
@@ -577,10 +644,12 @@ async function loadData(){
   const bar=document.getElementById('statusBar'), txt=document.getElementById('statusText');
   bar.className='status loading'; txt.textContent='正在获取最新数据...';
   try{
-    const [r1,r2,r3]=await Promise.all([
+    const [r1,r2,r3,r4,r5]=await Promise.all([
       fetch(API+'?t='+Date.now()),
       fetch(AI_API+'?t='+Date.now()).catch(()=>null),
-      fetch(ASK_API+'?t='+Date.now()).catch(()=>null)
+      fetch(ASK_API+'?t='+Date.now()).catch(()=>null),
+      fetch(HEALTH_API+'?t='+Date.now()).catch(()=>null),
+      fetch(CONTENDER_API+'?t='+Date.now()).catch(()=>null)
     ]);
     if(!r1.ok) throw new Error('HTTP '+r1.status);
     const json=await r1.json();
@@ -604,6 +673,8 @@ async function loadData(){
     document.getElementById('tsEl').textContent='更新于 '+new Date(json.generated_at).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
     document.getElementById('logoDot').style.background='var(--green)';
     bar.className='status ok'; txt.textContent='实时数据已连接 — Moomoo LV3 行情';
+    if(r4&&r4.ok) renderChampionHealth(await r4.json());
+    if(r5&&r5.ok) renderContenderBoard(await r5.json());
     renderAlerts(allData);
     renderCards(allData);
     if(selected){const s=allData.find(d=>d.ticker===selected);if(s)renderDetail(s);}

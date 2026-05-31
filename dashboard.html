@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MagicQuant Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ── Design tokens (DESIGN.md) ─────────────────────────────────────────── */
+:root {
+  --primary:            #150f23;
+  --ink-deep:           #1f1633;
+  --on-primary:         #ffffff;
+  --accent-lime:        #c2ef4e;
+  --accent-pink:        #fa7faa;
+  --accent-violet:      #6a5fc1;
+  --accent-violet-deep: #422082;
+  --accent-violet-mid:  #79628c;
+  --surface-dark:       #1f1633;
+  --surface-night:      #150f23;
+  --hairline-violet:    #362d59;
+  --on-dark-muted:      #bdb8c0;
+  --on-dark-faint:      #3f3849;
+
+  --font-ui:   'Rubik', -apple-system, system-ui, sans-serif;
+  --font-code: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+
+  --r-xs:  4px;
+  --r-sm:  6px;
+  --r-md:  8px;
+  --r-lg:  10px;
+  --r-xl:  12px;
+  --r-xxl: 18px;
+
+  --sp-xs:  4px;
+  --sp-sm:  8px;
+  --sp-md:  12px;
+  --sp-lg:  16px;
+  --sp-xl:  24px;
+  --sp-xxl: 32px;
+}
+
+/* ── Reset ──────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* ── Base ───────────────────────────────────────────────────────────────── */
+html, body {
+  height: 100%;
+  background: var(--surface-dark);
+  color: var(--on-primary);
+  font-family: var(--font-ui);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Layout ─────────────────────────────────────────────────────────────── */
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* ── Header / Nav ───────────────────────────────────────────────────────── */
+.nav {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: var(--primary);
+  border-bottom: 1px solid var(--hairline-violet);
+  padding: var(--sp-md) var(--sp-xl);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-lg);
+}
+
+.nav-logo {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--on-primary);
+  flex: 1;
+}
+
+.nav-logo span {
+  color: var(--accent-lime);
+}
+
+.live-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  text-transform: uppercase;
+  color: var(--on-dark-muted);
+  transition: color 0.3s;
+}
+
+.live-badge.connected { color: var(--accent-lime); }
+.live-badge.disconnected { color: var(--accent-pink); }
+
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  background: currentColor;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.live-badge.disconnected .live-dot { animation: none; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
+
+.nav-clock {
+  font-family: var(--font-code);
+  font-size: 14px;
+  color: var(--on-dark-muted);
+  min-width: 80px;
+  text-align: right;
+}
+
+/* ── Feed ───────────────────────────────────────────────────────────────── */
+.feed {
+  flex: 1;
+  max-width: 860px;
+  width: 100%;
+  margin: 0 auto;
+  padding: var(--sp-xl) var(--sp-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-lg);
+}
+
+/* ── Empty state ─────────────────────────────────────────────────────────── */
+.empty {
+  text-align: center;
+  padding: 96px var(--sp-xl);
+  color: var(--on-dark-muted);
+}
+
+.empty-icon { font-size: 48px; margin-bottom: var(--sp-lg); }
+
+.empty h2 {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: var(--sp-sm);
+  color: var(--on-primary);
+}
+
+.empty p { font-size: 14px; }
+
+/* ── Message card (card-feature-dark) ───────────────────────────────────── */
+.msg-card {
+  background: var(--surface-night);
+  border: 1px solid var(--hairline-violet);
+  border-radius: var(--r-xxl);
+  padding: var(--sp-xl);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-md);
+  animation: slide-in 0.25s ease-out;
+}
+
+@keyframes slide-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Style variants — border-left accent */
+.msg-card.style-A { border-left: 3px solid var(--accent-lime); }
+.msg-card.style-B { border-left: 3px solid var(--accent-violet); }
+/* style-C keeps default hairline-violet */
+
+/* ── Card meta row ───────────────────────────────────────────────────────── */
+.card-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-sm);
+  flex-wrap: wrap;
+}
+
+.card-ticker {
+  font-family: var(--font-code);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--on-primary);
+  background: var(--on-dark-faint);
+  border-radius: var(--r-xs);
+  padding: 2px 8px;
+}
+
+/* Trigger badges */
+.badge {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.25px;
+  text-transform: uppercase;
+  border-radius: var(--r-xs);
+  padding: 2px 8px;
+  line-height: 1.8;
+}
+
+.badge-lime   { background: var(--accent-lime);        color: var(--ink-deep); }
+.badge-pink   { background: var(--accent-pink);        color: var(--ink-deep); }
+.badge-violet { background: var(--accent-violet);      color: var(--on-primary); }
+.badge-deep   { background: var(--accent-violet-deep); color: var(--on-primary); }
+.badge-muted  { background: var(--on-dark-faint);      color: var(--on-dark-muted); }
+
+.card-time {
+  margin-left: auto;
+  font-family: var(--font-code);
+  font-size: 12px;
+  color: var(--on-dark-muted);
+}
+
+/* ── Card body ───────────────────────────────────────────────────────────── */
+.card-body {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--on-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.card-body b, .card-body strong {
+  font-weight: 700;
+  color: var(--on-primary);
+}
+
+/* Separator line replacing ━━━━ */
+.card-body .sep {
+  border: none;
+  border-top: 1px solid var(--hairline-violet);
+  margin: var(--sp-sm) 0;
+}
+
+/* Price / number highlight */
+.card-body .price {
+  font-family: var(--font-code);
+  font-size: 13px;
+  color: var(--accent-lime);
+}
+
+.card-body .price-neg {
+  font-family: var(--font-code);
+  font-size: 13px;
+  color: var(--accent-pink);
+}
+
+/* Timestamps in footer line */
+.card-body .ts-line {
+  font-family: var(--font-code);
+  font-size: 12px;
+  color: var(--on-dark-muted);
+}
+
+/* ── Card buttons (display-only) ─────────────────────────────────────────── */
+.card-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-sm);
+  padding-top: var(--sp-sm);
+  border-top: 1px solid var(--hairline-violet);
+}
+
+.btn-ghost {
+  background: var(--on-dark-faint);
+  color: var(--on-primary);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  text-transform: uppercase;
+  border: none;
+  border-radius: var(--r-xl);
+  padding: var(--sp-xs) var(--sp-md);
+  cursor: default;
+  opacity: 0.7;
+}
+
+/* ── Footer ─────────────────────────────────────────────────────────────── */
+.footer {
+  text-align: center;
+  font-size: 12px;
+  color: var(--on-dark-muted);
+  padding: var(--sp-xl);
+  border-top: 1px solid var(--hairline-violet);
+}
+
+/* ── Responsive ──────────────────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  .feed { padding: var(--sp-md) var(--sp-sm); gap: var(--sp-md); }
+  .msg-card { padding: var(--sp-lg); border-radius: var(--r-xl); }
+}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- Nav -->
+  <nav class="nav">
+    <div class="nav-logo">🔮 Magic<span>Quant</span></div>
+    <div class="live-badge" id="liveBadge">
+      <div class="live-dot"></div>
+      <span id="liveText">连接中</span>
+    </div>
+    <div class="nav-clock" id="clock">--:--:--</div>
+  </nav>
+
+  <!-- Feed -->
+  <main class="feed" id="feed">
+    <div class="empty" id="emptyState">
+      <div class="empty-icon">📡</div>
+      <h2>等待信号</h2>
+      <p>启动 bot 后，交易信号将实时出现在这里</p>
+    </div>
+  </main>
+
+  <footer class="footer">
+    MagicQuant Dashboard &nbsp;·&nbsp; <span id="msgCount">0</span> 条信号
+  </footer>
+
+</div>
+
+<script>
+// ── 触发类型 → 标签 + badge 样式 ─────────────────────────────────────────
+const TRIGGER_META = {
+  profit_target_hit: { label: "浮盈达标", cls: "badge-lime"   },
+  drawdown_from_peak:{ label: "高位回撤", cls: "badge-pink"   },
+  swing_top:         { label: "波段顶",   cls: "badge-pink"   },
+  swing_bottom:      { label: "波段底",   cls: "badge-lime"   },
+  direction_trend:   { label: "方向信号", cls: "badge-violet" },
+  rapid_move:        { label: "异动",     cls: "badge-violet" },
+  heartbeat:         { label: "心跳",     cls: "badge-muted"  },
+  ai:                { label: "AI 分析",  cls: "badge-deep"   },
+  system:            { label: "系统",     cls: "badge-muted"  },
+  general:           { label: "通知",     cls: "badge-muted"  },
+};
+
+// ── 文本处理 ─────────────────────────────────────────────────────────────
+function processText(raw) {
+  if (!raw) return "";
+
+  let html = raw
+    // 保留 <b> 和 <br>，转义其他危险标签
+    .replace(/<(?!\/?b>)(?!\/?strong>)(?!\/?br\s*\/?>)([^>]+)>/g, "")
+    // newline → <br>
+    .replace(/\n/g, "<br>")
+    // ━━━ 横线 → hr
+    .replace(/━+/g, '<hr class="sep">');
+
+  // 价格高亮：+$X.XX 绿，-$X.XX 红，$X.XX 默认绿
+  html = html
+    .replace(/(\+\$[\d,]+\.?\d*)/g, '<span class="price">$1</span>')
+    .replace(/(-\$[\d,]+\.?\d*)/g,  '<span class="price-neg">$1</span>')
+    .replace(/(\$[\d,]+\.?\d+)/g,   '<span class="price">$1</span>');
+
+  // 📡 时间戳行 — 整行降调
+  html = html.replace(/(📡[^<]*<br>)/g, '<span class="ts-line">$1</span>');
+  // ⚙️ footer 行
+  html = html.replace(/(⚙️[^<]*(<br>|$))/g, '<span class="ts-line">$1</span>');
+
+  return html;
+}
+
+// ── 时间格式化 ────────────────────────────────────────────────────────────
+function formatTime(iso) {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleTimeString("zh-CN", { hour12: false });
+  } catch { return ""; }
+}
+
+// ── 渲染单条消息 ──────────────────────────────────────────────────────────
+function renderCard(msg) {
+  const meta  = TRIGGER_META[msg.trigger] || TRIGGER_META.general;
+  const time  = formatTime(msg.timestamp);
+  const body  = processText(msg.text_html);
+  const style = msg.style || "C";
+
+  // 按钮行
+  let btnHtml = "";
+  const btns  = msg.buttons || [];
+  if (btns.length > 0) {
+    const flat = btns.flat();
+    const items = flat.map(b =>
+      `<button class="btn-ghost" disabled>${escHtml(b.text || "")}</button>`
+    ).join("");
+    btnHtml = `<div class="card-buttons">${items}</div>`;
+  }
+
+  const ticker = msg.ticker
+    ? `<span class="card-ticker">${escHtml(msg.ticker)}</span>` : "";
+
+  return `
+<article class="msg-card style-${escHtml(style)}" data-id="${escHtml(msg.id)}">
+  <div class="card-meta">
+    ${ticker}
+    <span class="badge ${meta.cls}">${meta.label}</span>
+    <span class="card-time">${time}</span>
+  </div>
+  <div class="card-body">${body}</div>
+  ${btnHtml}
+</article>`;
+}
+
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;")
+    .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+// ── Feed 渲染 ─────────────────────────────────────────────────────────────
+let renderedIds = new Set();
+let lastUpdated = null;
+
+function renderFeed(data) {
+  const messages = data.messages || [];
+  const feed     = document.getElementById("feed");
+  const empty    = document.getElementById("emptyState");
+  const counter  = document.getElementById("msgCount");
+
+  counter.textContent = messages.length;
+
+  if (messages.length === 0) {
+    if (!empty) feed.innerHTML = `<div class="empty" id="emptyState">
+      <div class="empty-icon">📡</div>
+      <h2>等待信号</h2>
+      <p>启动 bot 后，交易信号将实时出现在这里</p>
+    </div>`;
+    return;
+  }
+
+  // 移除 empty state
+  const em = document.getElementById("emptyState");
+  if (em) em.remove();
+
+  // 找出新消息（在 renderedIds 中没有的）
+  const newMsgs = messages.filter(m => !renderedIds.has(m.id));
+  if (newMsgs.length === 0) return;
+
+  // 最新的排在最前，插入 feed 顶部
+  for (const msg of newMsgs) {
+    renderedIds.add(msg.id);
+    const div = document.createElement("div");
+    div.innerHTML = renderCard(msg).trim();
+    const card = div.firstChild;
+    // 插入到 feed 第一个子元素之前
+    feed.insertBefore(card, feed.firstChild);
+  }
+
+  // 超出 200 条时清理尾部 DOM（节省内存）
+  const cards = feed.querySelectorAll(".msg-card");
+  if (cards.length > 200) {
+    for (let i = 200; i < cards.length; i++) cards[i].remove();
+  }
+}
+
+// ── 轮询 /api/feed ────────────────────────────────────────────────────────
+const liveBadge = document.getElementById("liveBadge");
+const liveText  = document.getElementById("liveText");
+let retryCount  = 0;
+
+async function poll() {
+  try {
+    const r    = await fetch("/api/feed", { cache: "no-store" });
+    const data = await r.json();
+
+    if (data.updated_at !== lastUpdated) {
+      lastUpdated = data.updated_at;
+      renderFeed(data);
+    }
+
+    // 连接成功
+    liveBadge.className = "live-badge connected";
+    liveText.textContent = "LIVE";
+    retryCount = 0;
+  } catch {
+    retryCount++;
+    liveBadge.className = "live-badge disconnected";
+    liveText.textContent = retryCount > 3 ? "离线" : "重连中";
+  }
+}
+
+setInterval(poll, 2000);
+poll();
+
+// ── 时钟 ─────────────────────────────────────────────────────────────────
+function tickClock() {
+  document.getElementById("clock").textContent =
+    new Date().toLocaleTimeString("zh-CN", { hour12: false });
+}
+setInterval(tickClock, 1000);
+tickClock();
+</script>
+</body>
+</html>

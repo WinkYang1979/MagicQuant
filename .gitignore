@@ -38,6 +38,7 @@ data/ta_version_check.json
 research/vectorbt_lab/data/
 research/vectorbt_lab/output/
 research/vectorbt_lab/state/
+research/_*.txt
 
 # Generated reports / 自动生成报告
 reports/

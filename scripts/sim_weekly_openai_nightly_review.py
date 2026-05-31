@@ -1,5 +1,5 @@
 """OpenAI duel nightly adaptive review.
-VERSION: v0.1.0
+VERSION: v0.2.0
 DEPENDS: data/sim_weekly/duel_ledger_*.json, data/sim_weekly/live_duel_openai_v1.json,
          core/sim_weekly/openai_contestant.py
 
@@ -21,6 +21,8 @@ STATE_PATH = SIM_DIR / "openai_adaptive_state.json"
 CONFIG_PATH = SIM_DIR / "openai_adaptive_config.json"
 LOG_PATH = SIM_DIR / "openai_adjustment_log.json"
 OPENAI_LIVE_STATE = SIM_DIR / "live_duel_openai_v1.json"
+FAST_REVIEW_CYCLE_WEEKS = 2
+REVIEW_CYCLE_WEEKS = 4
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -57,6 +59,54 @@ def _score_for(payload: dict, name: str) -> dict:
     return (payload.get("contestants") or {}).get(name) or {}
 
 
+def _time_bucket(ts: str, session: str | None = None) -> str:
+    if session and session != "rth":
+        return f"non_rth_{session}"
+    try:
+        dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return "unknown"
+    now = dt.time()
+    if dt.weekday() == 0 and now < datetime.strptime("10:30", "%H:%M").time():
+        return "monday_open"
+    if dt.weekday() == 0 and now >= datetime.strptime("14:30", "%H:%M").time():
+        return "monday_late"
+    if dt.weekday() == 4 and now >= datetime.strptime("14:30", "%H:%M").time():
+        return "friday_late"
+    if now < datetime.strptime("10:00", "%H:%M").time():
+        return "rth_open_30m"
+    if datetime.strptime("11:30", "%H:%M").time() <= now < datetime.strptime("13:30", "%H:%M").time():
+        return "rth_midday"
+    if now >= datetime.strptime("15:00", "%H:%M").time():
+        return "rth_close_60m"
+    return "rth_core"
+
+
+def _trade_time_bucket_stats(trades: list[dict]) -> dict:
+    stats: dict[str, dict] = {}
+    open_by_ticker: dict[str, dict] = {}
+
+    def bucket_row(name: str) -> dict:
+        return stats.setdefault(name, {"round_trips": 0, "losses": 0, "pnl": 0.0})
+
+    for trade in trades or []:
+        side = trade.get("side")
+        ticker = trade.get("ticker")
+        if side == "buy" and ticker:
+            open_by_ticker[ticker] = trade
+            continue
+        if side != "sell" or not ticker:
+            continue
+        entry = open_by_ticker.pop(ticker, trade)
+        bucket = _time_bucket(str(entry.get("ts") or trade.get("ts")), entry.get("session") or trade.get("session"))
+        pnl = float(trade.get("pnl") or 0.0)
+        row = bucket_row(bucket)
+        row["round_trips"] += 1
+        row["losses"] += 1 if pnl <= 0 else 0
+        row["pnl"] = round(float(row["pnl"]) + pnl, 2)
+    return stats
+
+
 def _regime_observation(ledger: dict) -> dict:
     openai = _score_for(ledger, "openai_v1")
     claude = _score_for(ledger, "claude_rule")
@@ -81,6 +131,7 @@ def _regime_observation(ledger: dict) -> dict:
         "openai_max_drawdown_pct": openai.get("max_drawdown_pct"),
         "openai_trades": openai.get("n_trades"),
         "claude_return_pct": claude.get("return_pct"),
+        "time_bucket_stats": _trade_time_bucket_stats(openai.get("trades") or []),
     }
 
 
@@ -94,9 +145,61 @@ def _update_regime_state(state: dict, obs: dict) -> dict:
     if len(last_two) == 2 and last_two[0].get("observed_regime") == last_two[1].get("observed_regime"):
         confirmed = last_two[-1].get("observed_regime")
     state["observations"] = history
+    state["cycle_reviews"] = {
+        "2w": _weighted_cycle_review(history, FAST_REVIEW_CYCLE_WEEKS),
+        "4w": _weighted_cycle_review(history, REVIEW_CYCLE_WEEKS),
+    }
+    state["cycle_review"] = state["cycle_reviews"]["4w"]
     state["confirmed_regime"] = confirmed or state.get("confirmed_regime") or "unknown"
     state["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return state
+
+
+def _weighted_cycle_review(history: list[dict], cycle_weeks: int = REVIEW_CYCLE_WEEKS) -> dict:
+    cycle = list(history[-cycle_weeks:])
+    if not cycle:
+        return {"cycle_weeks": cycle_weeks, "sample_count": 0}
+    weights = list(range(1, len(cycle) + 1))
+    weight_sum = float(sum(weights))
+
+    def weighted_avg(key: str) -> float:
+        total = 0.0
+        used = 0.0
+        for obs, weight in zip(cycle, weights):
+            try:
+                value = float(obs.get(key))
+            except (TypeError, ValueError):
+                continue
+            total += value * weight
+            used += weight
+        return round(total / used, 2) if used else 0.0
+
+    weighted_benchmark = weighted_avg("benchmark_buyhold_RKLB_pct")
+    if weighted_benchmark >= 3.0:
+        weighted_regime = "bull"
+    elif weighted_benchmark <= -3.0:
+        weighted_regime = "bear"
+    else:
+        weighted_regime = "chop"
+    bucket_stats: dict[str, dict] = {}
+    for obs in cycle:
+        for bucket, row in (obs.get("time_bucket_stats") or {}).items():
+            target = bucket_stats.setdefault(bucket, {"round_trips": 0, "losses": 0, "pnl": 0.0})
+            target["round_trips"] += int(row.get("round_trips") or 0)
+            target["losses"] += int(row.get("losses") or 0)
+            target["pnl"] = round(float(target["pnl"]) + float(row.get("pnl") or 0.0), 2)
+    return {
+        "cycle_weeks": cycle_weeks,
+        "sample_count": len(cycle),
+        "dates": [obs.get("date") for obs in cycle],
+        "recency_weights_old_to_new": weights,
+        "weighted_benchmark_buyhold_RKLB_pct": weighted_benchmark,
+        "weighted_openai_return_pct": weighted_avg("openai_return_pct"),
+        "weighted_openai_max_drawdown_pct": weighted_avg("openai_max_drawdown_pct"),
+        "weighted_claude_return_pct": weighted_avg("claude_return_pct"),
+        "weighted_regime": weighted_regime,
+        "time_bucket_stats": bucket_stats,
+    }
 
 
 def _config_for_regime(regime: str) -> dict:
@@ -106,27 +209,29 @@ def _config_for_regime(regime: str) -> dict:
         cfg["profile"] = "bull_ride"
         cfg["hypothesis_id"] = "bull_ride_v1"
         params.update({
-            "rklx_fraction": 0.66,
-            "rklb_fraction": 0.40,
-            "rklx_stop_pct": 0.085,
-            "rklb_stop_pct": 0.055,
+            "rklx_fraction": 0.82,
+            "rklx_weak_fraction": 0.30,
+            "rklx_stop_pct": 0.095,
+            "short_fraction": 0.0,
             "cooldown_bars": 2,
             "bull_long_rsi_max": 84,
             "bull_gap_atr": 0.45,
             "avoid_shorts_in_bull": True,
+            "rklx_min_week_change": 3.0,
+            "monday_no_new_after": "14:30",
         })
     elif regime == "bear":
         cfg["profile"] = "defensive"
         cfg["hypothesis_id"] = "bear_defense_v1"
         params.update({
-            "rklx_fraction": 0.30,
-            "rklb_fraction": 0.24,
-            "rklx_stop_pct": 0.052,
-            "rklb_stop_pct": 0.034,
-            "short_fraction": 0.30,
+            "rklx_fraction": 0.24,
+            "rklx_weak_fraction": 0.0,
+            "rklx_stop_pct": 0.060,
+            "short_fraction": 0.0,
             "short_stop_pct": 0.060,
             "cooldown_bars": 5,
-            "avoid_shorts_in_bull": False,
+            "avoid_shorts_in_bull": True,
+            "rklx_min_week_change": 5.0,
         })
     else:
         cfg["profile"] = "neutral"
@@ -186,7 +291,12 @@ def run_review(date_label: str | None = None, apply: bool = True) -> dict:
     obs = _regime_observation(ledger)
     state = _update_regime_state(_read_json(STATE_PATH, {}), obs)
     confirmed = state.get("confirmed_regime") or "unknown"
-    profile_regime = confirmed if confirmed in ("bull", "bear") else "neutral"
+    cycle_review = state.get("cycle_review") or {}
+    cycle_regime = cycle_review.get("weighted_regime")
+    if cycle_review.get("sample_count", 0) >= REVIEW_CYCLE_WEEKS and cycle_regime in ("bull", "bear"):
+        profile_regime = cycle_regime
+    else:
+        profile_regime = confirmed if confirmed in ("bull", "bear") else "neutral"
     config = _config_for_regime(profile_regime)
     text = _hypothesis_text(obs, confirmed, config["profile"])
     entry = {
@@ -196,6 +306,8 @@ def run_review(date_label: str | None = None, apply: bool = True) -> dict:
         "confirmed_regime": confirmed,
         "next_profile": config["profile"],
         "hypothesis_id": config["hypothesis_id"],
+        "review_cycle": cycle_review,
+        "review_cycles": state.get("cycle_reviews") or {},
         **text,
         "tomorrow_config": config,
         "next_day_result": None,
@@ -224,6 +336,7 @@ def _telegram_text(result: dict) -> str:
         "📊 <b>OpenAI 夜间自适应复盘</b>\n"
         f"日期: {entry['date']}\n"
         f"确认 regime: {entry['confirmed_regime']}\n"
+        f"4周加权 regime: {(entry.get('review_cycle') or {}).get('weighted_regime', 'n/a')}\n"
         f"明日 profile: {entry['next_profile']}\n"
         f"观察: {entry['observation']}\n"
         f"假设: {entry['hypothesis']}\n"
