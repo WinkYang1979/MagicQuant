@@ -42,11 +42,59 @@ def _ensure_state(session):
         session._position_followup_state = {}
     if not hasattr(session, "_position_followup_done"):
         session._position_followup_done = {}
+    if not hasattr(session, "_invalidated_anchor"):
+        session._invalidated_anchor = {}
     return session._position_followup_state, session._position_followup_done
 
 
 def _target_state(session, ticker: str) -> dict:
     return ((getattr(session, "_target_state", {}) or {}).get(ticker) or {})
+
+
+def _clear_invalidated_anchor(session, ticker: str) -> None:
+    try:
+        state = getattr(session, "_invalidated_anchor", None)
+        if isinstance(state, dict):
+            state.pop(ticker, None)
+    except Exception:
+        pass
+
+
+def _invalidated_allowed(session, ticker: str, sig, current: float, target: dict) -> bool:
+    """One-shot INVALIDATED unless position changes or price enters a new lower stage."""
+    state = getattr(session, "_invalidated_anchor", None)
+    if not isinstance(state, dict):
+        state = {}
+        session._invalidated_anchor = state
+    info = state.get(ticker)
+    if not info or info.get("sig") != sig:
+        return True
+    try:
+        anchor = float(info.get("anchor_price") or 0)
+        if anchor <= 0 or current <= 0:
+            return False
+        atr = float((target or {}).get("atr") or 0)
+        stage_drop = max(anchor * 0.03, atr if atr > 0 else 0)
+        return current <= anchor - stage_drop
+    except (TypeError, ValueError):
+        return False
+
+
+def _mark_invalidated_anchor(session, ticker: str, sig, current: float, pl_pct: float, reason: str) -> None:
+    try:
+        state = getattr(session, "_invalidated_anchor", None)
+        if not isinstance(state, dict):
+            state = {}
+            session._invalidated_anchor = state
+        state[ticker] = {
+            "sig": sig,
+            "anchor_price": float(current),
+            "pl_pct": float(pl_pct),
+            "reason": reason,
+            "ts": time.time(),
+        }
+    except Exception:
+        pass
 
 
 def _data_untrusted(session) -> Optional[str]:
@@ -198,6 +246,7 @@ def check_position_followup(session, ticker: str, indicators=None, params=None):
     """Return a single held-position follow-up hit. / 返回一个持仓跟进状态。"""
     pos = session.get_position(ticker) if hasattr(session, "get_position") else None
     if not pos or (pos.get("qty", 0) or 0) <= 0:
+        _clear_invalidated_anchor(session, ticker)
         return None
 
     qty = int(pos.get("qty") or 0)
@@ -211,6 +260,7 @@ def check_position_followup(session, ticker: str, indicators=None, params=None):
     key = f"{ticker}:{sig}"
     if state.get(ticker) != sig:
         state[ticker] = sig
+        _clear_invalidated_anchor(session, ticker)
         for old in list(done.keys()):
             if old.startswith(f"{ticker}:"):
                 done.pop(old, None)
@@ -238,13 +288,14 @@ def check_position_followup(session, ticker: str, indicators=None, params=None):
         return None
 
     if stop and current <= float(stop):
-        cool_key = f"position_followup_invalidated_{ticker}"
-        if session.can_trigger(cool_key, cooldown_sec=600):
-            session.mark_triggered(cool_key)
+        reason = "price_below_atr_stop"
+        if _invalidated_allowed(session, ticker, sig, current, target):
+            _mark_invalidated_anchor(session, ticker, sig, current, pl_pct, reason)
+            session.mark_triggered(f"position_followup_invalidated_{ticker}")
             return _emit(session, _hit(
                 ticker, "INVALIDATED", qty, cost, current, pl_val, pl_pct,
                 stop=stop, t1=t1, hold_sec=hold_sec,
-                reason="price_below_atr_stop", adverse_pct=adverse_pct,
+                reason=reason, adverse_pct=adverse_pct,
                 rebound_pct=rebound_pct,
             ))
         return None
@@ -272,10 +323,10 @@ def check_position_followup(session, ticker: str, indicators=None, params=None):
         and adverse_pct is not None and adverse_pct >= 1.5
         and _bars_bearish(session, indicators)
     ):
-        cool_key = f"position_followup_invalidated_{ticker}"
-        if session.can_trigger(cool_key, cooldown_sec=600):
-            session.mark_triggered(cool_key)
-            reason = "cost_retest_failed" if done.get(retest_key) else "structural_breakdown"
+        reason = "cost_retest_failed" if done.get(retest_key) else "structural_breakdown"
+        if _invalidated_allowed(session, ticker, sig, current, target):
+            _mark_invalidated_anchor(session, ticker, sig, current, pl_pct, reason)
+            session.mark_triggered(f"position_followup_invalidated_{ticker}")
             return _emit(session, _hit(
                 ticker, "INVALIDATED", qty, cost, current, pl_val, pl_pct,
                 stop=stop, t1=t1, hold_sec=hold_sec,

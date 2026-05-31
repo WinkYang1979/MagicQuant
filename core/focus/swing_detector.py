@@ -1233,6 +1233,52 @@ def _recent_bars_from_session_or_indicators(session, indicators):
     return None
 
 
+def _rth_open_from_recent_bars(session, indicators=None):
+    """Return the current ET day's first RTH 5m open. / 取当天 RTH 第一根 5m 开盘价。"""
+    bars = _recent_bars_from_session_or_indicators(session, indicators)
+    if not bars:
+        return None
+    parsed = []
+    for bar in bars:
+        if not isinstance(bar, dict):
+            continue
+        raw_ts = bar.get("time_key") or bar.get("time") or bar.get("datetime")
+        try:
+            open_price = float(bar.get("open") or 0)
+        except (TypeError, ValueError):
+            open_price = 0
+        if not raw_ts or open_price <= 0:
+            continue
+        try:
+            ts = datetime.strptime(str(raw_ts)[:19], "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            continue
+        parsed.append((ts, open_price))
+    if not parsed:
+        return None
+    latest_date = max(ts.date() for ts, _ in parsed)
+    today_rows = [(ts, op) for ts, op in parsed if ts.date() == latest_date]
+    rth_rows = [
+        (ts, op) for ts, op in today_rows
+        if (ts.hour, ts.minute) >= (9, 30) and (ts.hour, ts.minute) <= (16, 0)
+    ]
+    rows = rth_rows or today_rows
+    rows.sort(key=lambda item: item[0])
+    return rows[0][1]
+
+
+def _intraday_change_from_rth_open(session, ticker, indicators=None):
+    """Compute RTH intraday move from the first 5m open. / 用 RTH 第一根 5m 开盘算盘中涨跌。"""
+    current = session.get_last_price(ticker) if hasattr(session, "get_last_price") else None
+    day_open = _rth_open_from_recent_bars(session, indicators)
+    try:
+        if current is None or day_open is None or day_open <= 0:
+            return None, day_open
+        return (float(current) - float(day_open)) / float(day_open) * 100.0, day_open
+    except Exception:
+        return None, day_open
+
+
 def _last_n_closes_below_vwap(session, indicators, n=3) -> bool:
     vwap = (indicators or {}).get("vwap")
     if not vwap:
@@ -1873,6 +1919,8 @@ def check_direction_trend(session, ticker, indicators, params=None):
         strength = "STRONG" if abs(day_chg) >= strong_threshold else "WEAK"
 
     cap_reasons = []
+    intraday_chg = None
+    intraday_open = None
     top_warning = None
     if strength == "STRONG" and direction in ("long", "short"):
         top_warning = _recent_top_warning(
@@ -1888,6 +1936,37 @@ def check_direction_trend(session, ticker, indicators, params=None):
         if strength == "STRONG" and _trend_rsi_rolling_over(session, direction):
             strength = "WEAK"
             cap_reasons.append("rsi_rolling_over")
+        if strength == "STRONG" and has_indicators:
+            intraday_chg, intraday_open = _intraday_change_from_rth_open(session, ticker, indicators)
+            current_p = session.get_last_price(ticker)
+            vwap_p = indicators.get("vwap")
+            try:
+                gap_long_not_confirmed = (
+                    direction == "long"
+                    and day_chg > 0
+                    and intraday_chg is not None
+                    and intraday_chg <= 0
+                    and current_p is not None
+                    and vwap_p
+                    and float(current_p) < float(vwap_p)
+                )
+                gap_short_not_confirmed = (
+                    direction == "short"
+                    and day_chg < 0
+                    and intraday_chg is not None
+                    and intraday_chg >= 0
+                    and current_p is not None
+                    and vwap_p
+                    and float(current_p) > float(vwap_p)
+                )
+            except (TypeError, ValueError):
+                gap_long_not_confirmed = False
+                gap_short_not_confirmed = False
+            if gap_long_not_confirmed or gap_short_not_confirmed:
+                # Keep the directional hint, but do not call an overnight gap a STRONG intraday trend.
+                # 保留方向提示，但隔夜缺口未获盘中确认时不能标成强信号。
+                strength = "WEAK"
+                cap_reasons.append("gap_not_intraday_confirmed")
 
     cool_key = f"trend_{direction}_{ticker}"
     if not session.can_trigger(cool_key, cooldown_sec=params["trend_cooldown_sec"]):
@@ -1913,6 +1992,8 @@ def check_direction_trend(session, ticker, indicators, params=None):
             "rsi_history": indicators.get("rsi_history") if has_indicators else None,
             "confidence_cap": 65 if top_warning else None,
             "cap_reasons": cap_reasons,
+            "intraday_change_pct": intraday_chg,
+            "intraday_open": intraday_open,
             "top_warning_trigger": top_warning.get("trigger") if top_warning else None,
             "top_warning_elapsed_sec": round(top_warning.get("elapsed"), 1) if top_warning else None,
             "choppy_filtered": False,  # 到这里说明通过了震荡过滤

@@ -2688,6 +2688,8 @@ def _fmt_signal_with_conflict(hit, session, signal_direction, title_line, tech_l
         conf_line += "  ·  RSI反弹"
     if "held_same_direction_cap" in cap_reasons:
         conf_line += "  ·  持仓中降级"
+    if "gap_not_intraday_confirmed" in cap_reasons:
+        conf_line += "  ·  缺口未获盘中确认,降级"
     if strength == "STRONG" and conf < 65:
         title_line = _downgrade_title_to_general(title_line)
         strength = "WEAK"
